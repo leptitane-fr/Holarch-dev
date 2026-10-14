@@ -1,0 +1,13 @@
+[package]
+name = "hln-type"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The browser's faces (Manrope and JetBrains Mono, see docs/TIERS.md),
+# smoothed in advance at every size pages use, and how to lay text out
+# with them.
+[dependencies]
+
+[lints]
+workspace = true

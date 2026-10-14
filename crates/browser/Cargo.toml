@@ -1,0 +1,16 @@
+[package]
+name = "hln-browser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The browser around the engine: tabs, the address bar, history and
+# bookmarks, its own pages, and how keys and the pointer drive it. It
+# draws itself on a canvas and asks the network through a trait, so the
+# holon and the bench share all of it.
+[dependencies]
+hln-type = { path = "../type" }
+hln-web = { path = "../web" }
+
+[lints]
+workspace = true

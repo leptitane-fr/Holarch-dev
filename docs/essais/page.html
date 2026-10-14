@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><title>Page d'essai du moteur</title>
+<style>
+:root { --accent: #1460f0; --ink: #0d1b3a; }
+body { font-family: Manrope, sans-serif; color: var(--ink); margin: 0; background: #eaf1ff; }
+header { background: #0c121c; color: #e6eef8; padding: 14px 24px; display: flex; align-items: center; justify-content: space-between; }
+header nav a { color: #8fb8ff; margin-left: 18px; text-decoration: none; }
+main { max-width: 760px; margin: 24px auto; background: white; padding: 24px 32px; border-radius: 14px; border: 1px solid #c9d6f0; }
+h1 { color: var(--accent); margin-top: 0 }
+.encart { float: right; width: 200px; margin: 0 0 12px 16px; padding: 10px 12px; background: #f3f6fc; border: 1px solid #d5dff2; border-radius: 8px; font-size: 14px }
+code { background: #eef1f6; padding: 1px 4px; border-radius: 4px }
+table { border-collapse: collapse; width: 100% }
+th, td { border: 1px solid #c9d6f0; padding: 6px 10px; text-align: left }
+th { background: #f3f6fc }
+.cartes { display: flex; gap: 12px; flex-wrap: wrap }
+.carte { flex: 1 1 180px; padding: 12px; border-radius: 8px; background: #0c121c; color: #e6eef8 }
+.carte b { color: #4ec9a8 }
+blockquote { border-left: 4px solid var(--accent); margin-left: 0; padding-left: 16px; color: #3b4a6b; font-style: italic }
+footer { text-align: center; color: #6b7a99; font-size: 13px; padding: 16px }
+</style></head>
+<body>
+<header><strong>Le moteur</strong><nav><a href="#texte">Texte</a><a href="#listes">Listes</a><a href="#tableau">Tableau</a></nav></header>
+<main>
+<h1>Une page d'essai</h1>
+<div class="encart"><b>Encart flottant.</b> Le texte de l'article passe à côté de lui, puis reprend toute la largeur en dessous.</div>
+<p id="texte">Ce moteur est écrit <em>de zéro</em>, en Rust, sans aucune bibliothèque : il lit le <code>HTML</code>, applique le <abbr title="Cascading Style Sheets">CSS</abbr> (la cascade, <code>var()</code>, <code>calc()</code>, les sélecteurs), place les blocs et les lignes, puis dessine la page avec les polices Manrope et JetBrains&nbsp;Mono. Les mots <strong>gras</strong>, <i>italiques</i>, <u>soulignés</u>, <s>barrés</s> et les <a href="https://exemple.fr/">liens</a> suivent le texte d'une ligne à l'autre.</p>
+<blockquote>« Rien n'entre sans votre accord, devant l'écran. »</blockquote>
+<h2 id="listes">Listes</h2>
+<ul><li>une liste à puces,<ul><li>imbriquée,</li><li>sur deux niveaux ;</li></ul></li><li>des numéros :</li></ul>
+<ol type="I" start="3"><li>trois</li><li>quatre</li></ol>
+<h2 id="tableau">Tableau</h2>
+<table><tr><th>Partie</th><th>État</th><th>Remarque</th></tr>
+<tr><td>HTML</td><td>fait</td><td>corrections des navigateurs comprises</td></tr>
+<tr><td>CSS</td><td>fait</td><td rowspan="2">cascade, variables, <code>@media</code></td></tr>
+<tr><td>Mise en page</td><td>fait</td></tr>
+<tr><td colspan="3" style="text-align:center; background:#fff8e1">Images et JavaScript : plus tard</td></tr></table>
+<h2>Boîtes flexibles</h2>
+<div class="cartes"><div class="carte"><b>Blocs</b><br>marges fusionnées</div><div class="carte"><b>Lignes</b><br>autour des flottants</div><div class="carte"><b>Flex</b><br>rangées et colonnes</div></div>
+<p><label>Rechercher : <input name="q" placeholder="un mot"></label> <button>Chercher</button> <input type="checkbox" checked> coché</p>
+<pre>fn main() {
+    println!("Bonjour");
+}</pre>
+</main>
+<footer>Page d'essai — dessinée par le moteur du navigateur</footer>
+</body></html>
