@@ -2,6 +2,20 @@
 
 À lire en premier par la session suivante. Le plus récent en haut.
 
+## La suite voulue par Stef (14/10, 8 h 47)
+
+PR #1 passée en relecture. Ensuite, dans l'ordre :
+1. attendre que le système sache télécharger et mettre à jour les holons ;
+2. essayer les fonctions du navigateur avec Stef, quand Claude le juge
+   prêt ;
+3. concevoir l'interface : **innovante, modulable selon le site affiché** ;
+4. un **module de vérification du site visité** : pas seulement les
+   certificats, mais l'historique du nom de domaine (âge, changements de
+   propriétaire...), contre les faux sites marchands créés par IA. Le site
+   s'ouvre normalement, le navigateur cherche en parallèle et informe vite,
+   clairement et simplement de la fiabilité du site. Prévoir l'accès
+   réseau qu'il faudra (RDAP, etc.) dans les demandes faites au système.
+
 ## 2026-10-14 (fin de matinée) — Le holon, la fusion de deux sessions, la PR
 
 Deux sessions ont travaillé en même temps sur la branche
