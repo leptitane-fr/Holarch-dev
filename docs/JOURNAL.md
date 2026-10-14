@@ -32,7 +32,8 @@ Retours de Stef sur le premier essai dans Holarch :
    Windows-1252. La recherche Google demande JavaScript : celle de
    l'accueil (DuckDuckGo HTML) marche sans.
 
-Nouveau holon : SHA-256 `5c908025…901f` (`docs/livraison-alpha-2.md`).
+Version **0.1.1** (pour que la copie installée se mette à jour), SHA-256
+`2f7085ab…f32e` (`docs/livraison-alpha-2.md`).
 
 ### Reste à faire, par ordre d'effet sur ce que voit Stef
 1. Les images (PNG, JPEG, GIF) : Google et la plupart des sites.
