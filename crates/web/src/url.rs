@@ -141,14 +141,7 @@ impl Url {
                 Some(i) if scheme != "data" && scheme != "javascript" => (&rest[..i], Some(rest[i + 1..].to_string())),
                 _ => (rest, None),
             };
-            return Some(Url {
-                scheme,
-                host: String::new(),
-                port: None,
-                path: path.to_string(),
-                query,
-                fragment,
-            });
+            return Some(Url { scheme, host: String::new(), port: None, path: path.to_string(), query, fragment });
         }
         // `file:///chemin`: no host.
         let rest = if scheme == "file" && rest.starts_with("///") { &rest[2..] } else { rest };
@@ -157,7 +150,11 @@ impl Url {
         } else {
             rest.trim_start_matches(['/', '\\'])
         };
-        let end = if scheme == "file" && rest.starts_with('/') { 0 } else { rest.find(['/', '\\', '?']).unwrap_or(rest.len()) };
+        let end = if scheme == "file" && rest.starts_with('/') {
+            0
+        } else {
+            rest.find(['/', '\\', '?']).unwrap_or(rest.len())
+        };
         let authority = &rest[..end];
         let rest = &rest[end..];
         // user:password@ is dropped: the browser never sends it.
@@ -213,9 +210,9 @@ impl Url {
             }
         }
         if !self.is_hierarchical() {
-            return if reference.starts_with('#') {
+            return if let Some(fragment) = reference.strip_prefix('#') {
                 let mut url = self.clone();
-                url.fragment = Some(reference[1..].to_string());
+                url.fragment = Some(fragment.to_string());
                 Some(url)
             } else {
                 None
@@ -314,9 +311,8 @@ pub fn from_typed(typed: &str, search: &str) -> Option<Url> {
     }
     if !typed.contains(' ') {
         let lower = typed.to_ascii_lowercase();
-        let has_scheme = ["http:", "https:", "file:", "about:", "data:", "view-source:"]
-            .iter()
-            .any(|s| lower.starts_with(s));
+        let has_scheme =
+            ["http:", "https:", "file:", "about:", "data:", "view-source:"].iter().any(|s| lower.starts_with(s));
         if has_scheme && let Some(url) = Url::parse(typed) {
             return Some(url);
         }

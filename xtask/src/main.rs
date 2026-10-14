@@ -1,6 +1,8 @@
 //! The development tasks (see `cargo xtask help`).
 
+mod bench;
 mod faces;
+mod holon;
 mod page;
 mod png;
 
@@ -19,7 +21,10 @@ fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("faces") => faces::generate(&args[1..]),
         Some("page") => page::run(&args[1..]),
-        _ => Err("usage: cargo xtask <faces … | page …>".into()),
+        Some("bench") => bench::run(&args[1..]),
+        Some("holon") => holon::run(&args[1..]),
+        Some("test") => holon::run(&[]).and_then(|()| bench::run(&[])),
+        _ => Err("usage: cargo xtask <faces … | page … | bench … | holon | test>".into()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

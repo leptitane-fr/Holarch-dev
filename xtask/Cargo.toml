@@ -10,6 +10,7 @@ publish = false
 # only, so it may use crates the holon never does.
 [dependencies]
 hln-web = { path = "../crates/web" }
+hln-browser = { path = "../crates/browser" }
 
 
 ttf-parser = "0.25.1"

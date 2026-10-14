@@ -1,65 +1,73 @@
 # Journal de passation
 
-## 2026-10-14 — Navigateur Web, première étape (interrompue : quota atteint)
+À lire en premier par la session suivante. Le plus récent en haut.
 
-Branche : `claude/navigateur-web-sydt7q`. Le dépôt était vide (aucun commit,
-pas de `main`) : ce commit est le premier. Il faudra une branche `main`
-(commit minimal) pour ouvrir la PR brouillon ; **demander l'accord de Stef
-avant de pousser sur `main`**.
+## Pour reprendre (état au 14/10/2026, fin de matinée)
 
-### Choix de pile (annoncé)
-Rust 2024 (`rust-toolchain.toml` copié d'alpha-2), `no_std`, écrit de zéro,
-**entiers seulement** (millièmes de pixel : l'interpréteur WebAssembly du
-système refuse les flottants), livré comme holon WebAssembly
-(`wasm32-unknown-unknown`, imports `hln.log`, `hln.present`, `hln.input`).
-Polices Manrope et JetBrains Mono pré-tramées en 4 bits/pixel
-(`docs/TIERS.md` : licences OFL). Aucune caisse externe hors `xtask`.
+Branche : `claude/navigateur-web-sydt7q` (le dépôt n'a pas encore de
+`main` : question posée à Stef, carte du 14/10, « créer une branche main
+vide ? » ; la PR brouillon attend sa réponse).
 
-### Fait (tout compile, 33 tests du moteur passent)
-- `crates/type` (`hln-type`) : faces pré-tramées (`cargo xtask faces`,
-  polices récupérées sur fonts.gstatic.com), `face(mono, gras, taille)`.
-- `crates/web` (`hln-web`), le moteur : `url`, `html` (tokeniseur + arbre,
-  entités, jeux de caractères), `css` (cascade, @media, @import, sélecteurs,
-  spécificité), `style` (calc, var, couleurs, feuille de l'agent),
-  `layout` (blocs, lignes, flottants, tableaux avec rowspan/colspan, flex,
-  positionnement absolu/fixe), `paint` (canevas, texte lissé, clips),
-  `page` (liens, ancres, formulaires GET/POST, recherche dans la page,
-  meta refresh).
-- `xtask` : `cargo xtask page <fichier|url> [sortie.png] [--size WxH]
-  [--full] [--dump]` rend une page en PNG (curl pour le réseau).
-  Rendus vérifiés : `docs/essais/page.html` et pypi.org (copie locale).
+### Choix de pile (annoncé à Stef)
+Rust 2024, `no_std`, écrit de zéro, **entiers seulement** (millièmes de
+pixel : l'interpréteur WebAssembly du système refuse les flottants), livré
+en holon WebAssembly (`wasm32-unknown-unknown`, imports `hln.log`,
+`hln.present`, `hln.input`, plus `hln.fetch` proposé). Polices Manrope et
+JetBrains Mono pré-tramées en 4 bits/pixel (`docs/TIERS.md` : OFL).
+Aucune caisse externe hors `xtask`.
 
-### Commencé, hors de l'espace de travail pour l'instant
-`crates/browser` (`hln-browser`) : `net.rs` (trait `Net`, `Response`,
-`NetError`, `Offline`), `edit.rs` (ligne éditable, testée),
-`Cargo.toml`. Ces caisses ne sont **pas** dans `members` du `Cargo.toml`
-racine : les y remettre (`crates/browser`, `holons/navigateur`) et rajouter
-`hln-browser` aux dépendances de `xtask`.
+### Fait
+- `crates/type` (`hln-type`) : faces pré-tramées (`cargo xtask faces`).
+- `crates/web` (`hln-web`), le moteur : adresses, HTML (balises implicites,
+  tableaux, entités, jeux de caractères), CSS (cascade, @media, @import,
+  sélecteurs, var, calc), mise en page (blocs, lignes, flottants,
+  tableaux, flex, positions absolue et fixe), dessin, formulaires.
+- `crates/browser` (`hln-browser`), le navigateur : onglets avec leur
+  historique, barre d'adresse (adresse, nom de site ou recherche ;
+  suggestions tirées des favoris et de l'historique), favoris (étoile),
+  recherche dans la page, menu ≡, code source, pages à lui en français
+  (`about:accueil`, `favoris`, `historique`, `aide`, `a-propos`, `essai`,
+  pages d'erreur ; `NoRight` dit honnêtement que le réseau manque). Le
+  chargement se fait pas à pas (document, puis feuilles et `@import`,
+  ancre, autofocus, meta refresh), à travers le trait `Net`.
+- `holons/navigateur` (`hln-navigateur`) : le holon, tas par classes de
+  puissances de deux (`heap.rs`), boucle d'événements ; option `network`
+  qui importe `hln.fetch` au format de `hln_user::fetch::Answer`
+  d'alpha-2 (longueur, statut, raison).
+- `xtask` : `page` (le moteur seul en PNG), `bench` (tout le navigateur
+  piloté, une image par étape), `holon` (construit les deux modules et
+  vérifie imports et absence d'instructions flottantes), `test`.
+- **Essayé dans l'interpréteur d'alpha-2** (`crates/wasm` copié dans le
+  bac à sable, sans rien changer à alpha-2) : le holon démarre, affiche
+  l'accueil, ouvre pypi.org (copie locale servie par un faux
+  `hln.fetch`) avec ses feuilles, défile, ouvre le menu. Environ 1,6 s
+  pour charger et mettre en page pypi.org dans l'interpréteur (sur
+  l'hôte), mémoire montée à 297 pages (19 Mio, dont 8 Mio de tampon de
+  réception).
+- CI : `.github/workflows/check.yml` (fmt, clippy hôte et wasm, tests,
+  `cargo xtask test`, images en artefact).
 
-### Reste à faire (dans l'ordre)
-1. `hln-browser` : `lib.rs` (Browser, onglets, historique par onglet,
-   focus Page/Adresse/Champ/Recherche, chargement par étapes : document
-   puis feuilles et @import, ancre, autofocus, meta refresh), `chrome.rs`
-   (thème sombre : onglets 34 px, barre 40 px ← → ⟳ ⌂, adresse avec
-   cadenas, ☆, menu ≡ ; barre de progression, bulle d'état, barre de
-   défilement, barre de recherche, suggestions), `pages.rs` (about:accueil,
-   favoris, historique, aide, a-propos, essai, pages d'erreur en français,
-   sans nom de produit ; `NoRight` expliqué honnêtement).
-2. `xtask bench` : rendre le navigateur entier en PNG.
-3. Holon `holons/navigateur` : cdylib wasm, allocateur, boucle
-   d'événements, `hln.fetch` derrière une option `network` ; vérifier la
-   taille et l'absence d'instructions flottantes.
-4. `CLAUDE.md`, `README.md`, `.github/workflows/check.yml` ; fmt, clippy,
-   tests ; PR brouillon.
+### Reste à faire
+1. La PR brouillon dès que `main` existe (accord de Stef).
+2. Livraison au système, selon `docs/delivering-a-holon.md` d'alpha-2 :
+   crate `holons/navigateur` dans alpha-2, ligne dans `WASM_HOLONS`
+   (`navigateur`, `hln-navigateur`, version, résumé en français, droits
+   `network`) ; c'est la session qui tient alpha-2 qui le fait.
+3. Côté navigateur : images (PNG, JPEG, puis GIF), grille CSS, fusion des
+   marges parent-enfant, bordures en pointillés, `<details>`, presse-papiers
+   quand le système le donnera, POST quand `hln.fetch` le prendra, type de
+   contenu et adresse finale renvoyés par `hln.fetch`.
 
 ### À demander côté système (alpha-2)
-Droit `network` + import `hln.fetch` ; modules et mémoire bien plus grands
-(les faces pèsent ~1,1 Mo, la limite est 64 Kio / 1 Mio) ; fenêtre plus
-grande que 480×320 ; molette et modificateurs (Ctrl).
-
-### Lacunes connues du moteur
-Pas d'images (emplacements seulement), CSS grid rendu en blocs, pas de
-fusion des marges parent-enfant, pas de JavaScript.
+- Droit `network` + import `hln.fetch(url, url_len, body, capacity) -> i64`
+  (mot `Answer`), servi par le holon réseau ; idéalement aussi le type de
+  contenu, l'adresse finale après redirections, et POST.
+- Modules ≥ 2 Mio (le holon fait ~1,6 Mio, surtout les polices) et mémoire
+  ≥ 32 Mio (la mémoire initiale déclarée fait déjà ~35 pages : données +
+  pile de 1 Mio).
+- Fenêtre plus grande que 480 × 320 (le navigateur suit `Event::Resize`).
+- La molette (`Event::Wheel`) et Ctrl (`Event::Ctrl` : T, W, L, F, R, D…).
+- Les touches Page précédente / Page suivante.
 
 ### Environnement
 Le proxy du bac à sable refuse la plupart des sites (403) ; pypi.org,

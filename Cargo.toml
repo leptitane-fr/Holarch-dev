@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["crates/type", "crates/web", "xtask"]
-default-members = ["crates/type", "crates/web", "xtask"]
+members = ["crates/type", "crates/web", "crates/browser", "holons/navigateur", "xtask"]
+default-members = ["crates/type", "crates/web", "crates/browser", "xtask"]
 
 [workspace.package]
 version = "0.1.0"

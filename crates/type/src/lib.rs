@@ -118,7 +118,7 @@ impl Face {
         let n = glyph.at + y * glyph.w + x;
         let base = HEADER + self.count * RECORD;
         let byte = self.data[base + n / 2];
-        if n % 2 == 0 { byte & 15 } else { byte >> 4 }
+        if n.is_multiple_of(2) { byte & 15 } else { byte >> 4 }
     }
 
     /// The width of `text`, in sixteenths of a pixel.

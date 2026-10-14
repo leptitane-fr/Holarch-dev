@@ -14,7 +14,16 @@ use std::time::Instant;
 /// its body.
 pub fn fetch(url: &str) -> Result<(String, Option<String>, Vec<u8>)> {
     let out = Command::new("curl")
-        .args(["-sSL", "--max-time", "20", "-A", "Mozilla/5.0 (compatible; hln-web)", "-w", "\n%{url_effective}\n%{content_type}\n%{http_code}", url])
+        .args([
+            "-sSL",
+            "--max-time",
+            "20",
+            "-A",
+            "Mozilla/5.0 (compatible; hln-web)",
+            "-w",
+            "\n%{url_effective}\n%{content_type}\n%{http_code}",
+            url,
+        ])
         .output()
         .map_err(|e| format!("curl: {e}"))?;
     if !out.status.success() {
@@ -131,7 +140,16 @@ fn print_frag(page: &Page, f: &hln_web::layout::Frag, depth: usize) {
         (FragKind::Marker { text, .. }, _) => format!("marker {text}"),
         _ => String::from("(anonymous)"),
     };
-    println!("{:indent$}{what} {},{} {}x{}{}", "", f.x, f.y, f.w, f.h, if f.positioned { " positioned" } else { "" }, indent = depth * 2);
+    println!(
+        "{:indent$}{what} {},{} {}x{}{}",
+        "",
+        f.x,
+        f.y,
+        f.w,
+        f.h,
+        if f.positioned { " positioned" } else { "" },
+        indent = depth * 2
+    );
     if depth < 14 {
         for c in &f.children {
             print_frag(page, c, depth + 1);

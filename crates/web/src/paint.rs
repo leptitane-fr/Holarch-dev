@@ -112,10 +112,22 @@ impl Canvas {
             return 255;
         }
         // The corner's center, if the pixel is in a corner square.
-        let cx = if x < x0 + r { x0 + r } else if x >= x1 - r { x1 - r } else { return 255 };
-        let cy = if y < y0 + r { y0 + r } else if y >= y1 - r { y1 - r } else { return 255 };
+        let cx = if x < x0 + r {
+            x0 + r
+        } else if x >= x1 - r {
+            x1 - r
+        } else {
+            return 255;
+        };
+        let cy = if y < y0 + r {
+            y0 + r
+        } else if y >= y1 - r {
+            y1 - r
+        } else {
+            return 255;
+        };
         // Distance from the center to the pixel's center, in 16ths.
-        let dx = i64::from((x - cx) * 16 + if x < cx { 8 } else { 8 });
+        let dx = i64::from((x - cx) * 16 + 8);
         let dy = i64::from((y - cy) * 16 + 8);
         let d = isqrt(dx * dx + dy * dy) as i32;
         let edge = r * 16;
@@ -385,7 +397,16 @@ impl Painter<'_> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn text(&self, f: &Frag, s: &Style, text: &str, baseline: i32, deco: (u8, Color), canvas: &mut Canvas, opacity: u32) {
+    fn text(
+        &self,
+        f: &Frag,
+        s: &Style,
+        text: &str,
+        baseline: i32,
+        deco: (u8, Color),
+        canvas: &mut Canvas,
+        opacity: u32,
+    ) {
         let face = face_of(s);
         let color = faded(s.color, opacity);
         let (x, y) = (f.x + self.dx, f.y + self.dy);
@@ -599,7 +620,7 @@ impl Painter<'_> {
 }
 
 /// The fragments under the point (x, y) of the page, innermost last.
-pub fn hit<'a>(layout: &'a Layout, x: i32, y: i32) -> Vec<&'a Frag> {
+pub fn hit(layout: &Layout, x: i32, y: i32) -> Vec<&Frag> {
     fn walk<'a>(f: &'a Frag, x: i32, y: i32, out: &mut Vec<&'a Frag>, positioned: &mut Vec<&'a Frag>) {
         let inside = x >= f.x && x < f.x + f.w && y >= f.y && y < f.y + f.h;
         if inside {
@@ -661,7 +682,7 @@ mod tests {
         let face = hln_type::face(false, true, 16);
         let end = t.text(2, 2, "Âne", &face, Color::BLACK, false);
         assert!(end > 20);
-        assert!(t.pixels.iter().any(|&p| p == 0));
+        assert!(t.pixels.contains(&0));
         assert_eq!(isqrt(1_000_000), 1000);
     }
 }

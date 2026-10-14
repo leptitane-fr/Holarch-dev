@@ -104,8 +104,8 @@ fn charset_of(content_type: &str) -> Option<String> {
 pub fn windows_1252(b: u8) -> char {
     const HIGH: [u16; 32] = [
         0x20ac, 0x81, 0x201a, 0x192, 0x201e, 0x2026, 0x2020, 0x2021, 0x2c6, 0x2030, 0x160, 0x2039, 0x152, 0x8d, 0x17d,
-        0x8f, 0x90, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014, 0x2dc, 0x2122, 0x161, 0x203a, 0x153,
-        0x9d, 0x17e, 0x178,
+        0x8f, 0x90, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014, 0x2dc, 0x2122, 0x161, 0x203a, 0x153, 0x9d,
+        0x17e, 0x178,
     ];
     match b {
         0x80..=0x9f => char::from_u32(u32::from(HIGH[usize::from(b - 0x80)])).unwrap_or('?'),
@@ -155,7 +155,8 @@ pub fn unescape(text: &str, attribute: bool) -> String {
                 Some(h) => (true, h),
                 None => (false, num),
             };
-            let len = digits.bytes().take_while(|c| if hex { c.is_ascii_hexdigit() } else { c.is_ascii_digit() }).count();
+            let len =
+                digits.bytes().take_while(|c| if hex { c.is_ascii_hexdigit() } else { c.is_ascii_digit() }).count();
             if len > 0 {
                 let value = u32::from_str_radix(&digits[..len.min(8)], if hex { 16 } else { 10 }).unwrap_or(0xfffd);
                 let c = match value {
@@ -234,8 +235,8 @@ impl<'a> Tokenizer<'a> {
         let rest = self.rest();
         let b = rest.as_bytes();
         // rest starts with '<'
-        if rest.starts_with("<!--") {
-            let end = rest[4..].find("-->").map_or(rest.len(), |i| i + 7);
+        if let Some(after) = rest.strip_prefix("<!--") {
+            let end = after.find("-->").map_or(rest.len(), |i| i + 7);
             self.at += end;
             return Some(Token::Comment);
         }
@@ -694,10 +695,7 @@ mod tests {
     #[test]
     fn adds_the_missing_structure() {
         assert_eq!(tree("Bonjour"), r#"html(head body("Bonjour"))"#);
-        assert_eq!(
-            tree("<!DOCTYPE html><title>T</title><p>a<p>b"),
-            r#"html(head(title("T")) body(p("a") p("b")))"#
-        );
+        assert_eq!(tree("<!DOCTYPE html><title>T</title><p>a<p>b"), r#"html(head(title("T")) body(p("a") p("b")))"#);
     }
 
     #[test]
@@ -716,7 +714,9 @@ mod tests {
 
     #[test]
     fn raw_text_and_references() {
-        let doc = parse("<script>if (a<b) x='</p>';</script><p title='&eacute;t&eacute; &amp; &copy=1'>&lt;&#233;&#x20AC;&nbsp;&notit;&hellip;</p>");
+        let doc = parse(
+            "<script>if (a<b) x='</p>';</script><p title='&eacute;t&eacute; &amp; &copy=1'>&lt;&#233;&#x20AC;&nbsp;&notit;&hellip;</p>",
+        );
         let p = doc.find("p").unwrap();
         assert_eq!(doc.element(p).unwrap().attr("title"), Some("été & &copy=1"));
         assert_eq!(doc.text_content(p), "<é€\u{a0}¬it;…");
@@ -738,10 +738,7 @@ mod tests {
 
     #[test]
     fn foreign_content_closes_itself() {
-        assert_eq!(
-            tree("<svg><path d=x /><g><rect/></g></svg><p>a"),
-            r#"html(head body(svg(path g(rect)) p("a")))"#
-        );
+        assert_eq!(tree("<svg><path d=x /><g><rect/></g></svg><p>a"), r#"html(head body(svg(path g(rect)) p("a")))"#);
     }
 
     #[test]
