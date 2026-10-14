@@ -2,6 +2,36 @@
 
 À lire en premier par la session suivante. Le plus récent en haut.
 
+## 2026-10-14 (midi) — Le holon accordé au système d'alpha-2
+
+Lu dans alpha-2 (en lecture seule) : #70 fusionnée (modules de 16 Mio,
+mémoire de 256 Mio, virgule flottante), #71 fusionnée (droit `network`,
+`hln.fetch` à la signature du holon : `https` seulement, appel bloquant,
+ni POST, ni type de contenu, ni adresse finale), #72 en relecture (fenêtre
+de toute taille et plein écran, `RESIZED`, `WHEEL`, Maj/Ctrl/Alt aux
+bits 36 à 38, Page précédente 12 et suivante 13). Le navigateur n'est pas
+encore dans le dépôt (Holarch-update).
+
+### Fait (branche `claude/navigateur-web-sydt7q`, PR #2)
+- `network` est l'option par défaut : `navigateur.wasm` importe
+  `hln.fetch` ; `navigateur-hors-ligne.wasm` (`--no-default-features`)
+  ne l'importe pas. CI et README suivent.
+- Le holon lit les mots de #72 : `RESIZED` (le navigateur et son image
+  prennent la taille donnée), `WHEEL` (le système compte vers le haut, le
+  navigateur vers le bas : signe inversé), les modificateurs, Page
+  précédente et suivante.
+- Une adresse `http` est demandée en `https`.
+- Essayé dans l'interpréteur d'alpha-2 copié (bac à sable) : tout cela
+  marche ; SHA-256 du holon `93301dcf…9658`.
+- `docs/livraison-alpha-2.md` : la ligne `WASM_HOLONS` porte maintenant
+  le droit `network`.
+
+### Reste à faire
+1. Livraison par la session d'alpha-2 (fusion de #72, ligne
+   `WASM_HOLONS`, publication dans le dépôt), puis premier essai avec Stef.
+2. Quand le système les donnera : POST, type de contenu, adresse finale,
+   chargement sans bloquer la fenêtre.
+
 ## La suite voulue par Stef (14/10, 8 h 47)
 
 PR #1 passée en relecture. Ensuite, dans l'ordre :

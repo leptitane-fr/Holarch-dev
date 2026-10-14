@@ -1,42 +1,45 @@
 # Livrer le navigateur au système (pour la session qui tient alpha-2)
 
-Le holon : `navigateur-0.1.0.wasm` (fichiers du projet, `navigateur/` ; ou `cargo xtask holon` → `build/holon/navigateur.wasm`), SHA-256 `06e9bc75f981e572fd3ef4ac5c3dabe26edc88e52e44c808e7d966b01c16234e`.
-Il est construit depuis `leptitane-fr/Holarch-dev` (`main`) par `cargo xtask holon`, sans l'option `network`.
+Le holon : `navigateur-0.1.0.wasm` (fichiers du projet, `navigateur/` ; ou
+`cargo xtask holon` → `build/holon/navigateur.wasm`), 1 667 959 octets,
+SHA-256 `93301dcfdaa208fe182d73937ad8074b15e4fbf334afa10880fa706905dc9658`.
+Il est construit depuis `leptitane-fr/Holarch-dev` (branche
+`claude/navigateur-web-sydt7q`, PR #2) par `cargo xtask holon`, avec
+l'option `network`, qui est maintenant celle par défaut.
 
 ## Ce qu'il est
 
-- Il importe seulement `hln.log`, `hln.present` et `hln.input`.
+- Il importe `hln.log`, `hln.present`, `hln.input` et `hln.fetch`.
 - Il ne contient aucune instruction flottante (vérifié par `cargo xtask holon`).
-- Il a été essayé dans `crates/wasm` d'alpha-2, copié sur l'hôte :
-  - il démarre, dessine et lit les touches et la souris ;
-  - avec un faux `hln.fetch`, il ouvre une page et ses feuilles de style.
+- Il suit le contrat de `docs/delivering-a-holon.md` de la PR #72 d'alpha-2 :
+  - `RESIZED` : il dessine à la taille donnée ;
+  - `WHEEL` : la molette fait défiler la page ;
+  - Maj, Ctrl, Alt (bits 36 à 38) : Ctrl+L, Ctrl+T, Ctrl+F, Alt+← et les autres raccourcis ;
+  - Page précédente et Page suivante.
+- Il ouvre les adresses `http` en `https`, puisque le système n'ouvre que celles-là.
+- Il a été essayé dans `crates/wasm` d'alpha-2, copié sur l'hôte, avec un
+  faux `hln.fetch` : fenêtre de 960 × 600 puis de 640 × 400, Ctrl+L,
+  `http://pypi.org` ouvert en `https` avec ses feuilles, molette, Page
+  suivante, Ctrl+F.
 
-## Ce qui l'empêche de s'ouvrir aujourd'hui (`programs/wasm/src/main.rs`)
-
-| Limite | Aujourd'hui | Le navigateur |
-|---|---|---|
-| `MODULE_MAX` | 64 Kio | **1,6 Mio** (1 647 000 octets environ, dont 1,1 Mio de polices) |
-| `MAX_PAGES` | 16 (1 Mio) | mémoire initiale déclarée **34 pages** ; jusqu'à ~300 pages (19 Mio) sur une grosse page |
-
-Proposition :
-- `MODULE_MAX` à 4 Mio ;
-- `MAX_PAGES` à 512 (32 Mio) ;
-- et ce qui en découle : la projection du module (`MODULE_ADDRESS`, le trou jusqu'à `SURFACE_ADDRESS` fait 16 Mio, assez) et la taille des capsules reçues par la Bibliothèque et le coffre.
+Sans la PR #72, il marche aussi : il reste à 480 × 320 et les raccourcis
+avec Ctrl ne lui arrivent pas.
 
 ## La ligne à ajouter
 
-Dans `DEPOT_ONLY`, ou dans `WASM_HOLONS` s'il doit aussi aller sur la clé :
+Dans `WASM_HOLONS` (ou `DEPOT_ONLY` s'il ne doit pas aller sur la clé), avec
+le droit `network` :
 
 ```
-("navigateur", "hln_navigateur", "0.1.0", "Navigateur Web écrit de zéro : onglets, favoris, recherche dans la page", ""),
+("navigateur", "hln_navigateur", "0.1.0", "Navigateur Web écrit de zéro : onglets, favoris, recherche dans la page", "network"),
 ```
 
 Le paquet `hln-navigateur` vit dans Holarch-dev. Deux façons de l'avoir :
 - copier `crates/type`, `crates/web`, `crates/browser` et `holons/navigateur` dans alpha-2 ;
 - ou, pour ce premier essai, sceller directement le `.wasm` ci-dessus.
 
-## Plus tard
+## Encore attendu côté système
 
-- Droit `network` et import `hln.fetch(url, url_len, body, capacity) -> i64`, au format du mot `hln_user::fetch::Answer` ; le holon est prêt avec l'option `network`.
-- Fenêtre plus grande que 480 × 320.
-- Molette, Ctrl et Alt, Page précédente et Page suivante.
+- L'envoi de formulaires (POST) : la recherche de l'accueil passe par GET et marche déjà.
+- Le type de contenu et l'adresse finale après redirection.
+- Un `fetch` qui ne bloque pas la fenêtre pendant un chargement.

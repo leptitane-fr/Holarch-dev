@@ -1,11 +1,12 @@
-//! The web browser, as a holon: it reads the keys and the pointer of its
-//! window (`hln.input`), lets the browser handle them, takes one step of
-//! a load at a time when nothing waits, and shows the browser's image
-//! (`hln.present`) when it changed.
+//! The web browser, as a holon: it reads the words of its window
+//! (`hln.input`: keys with their modifiers, the pointer, the wheel, the
+//! room for its image), lets the browser handle them, takes one step of a
+//! load at a time when nothing waits, and shows the browser's image
+//! (`hln.present`) when it changed, at the size of the window's room.
 //!
-//! With the `network` feature, pages come through `hln.fetch`, the import
-//! this holon proposes to the system (served by the network holon, behind
-//! a `network` right):
+//! With the `network` feature (the default), pages come through
+//! `hln.fetch`, which the system gives a holon holding the `network`
+//! right (`docs/delivering-a-holon.md` of the system):
 //!
 //! `fetch(url: i32, url_len: i32, body: i32, capacity: i32) -> i64`
 //!
@@ -13,6 +14,7 @@
 //! writes at most `capacity` bytes of the body at `body`, and answers the
 //! word of `hln_user::fetch::Answer`: the body's length in bits 0 to 31,
 //! the HTTP status in 32 to 47, why it failed in 48 to 55 (0: it did not).
+//! The call blocks until the answer.
 
 #![no_std]
 
@@ -31,14 +33,21 @@ unsafe extern "C" {
     fn input(wait: i32) -> i64;
 }
 
-/// The window's size (`hln_user::window`).
+/// The window's size when it opens, until `RESIZED` says otherwise
+/// (`hln_user::window`), and the largest the system gives.
 const WIDTH: i32 = 480;
 const HEIGHT: i32 = 320;
+const ROOM_MAX: i32 = 4095;
 
-/// The words of `hln.input` (`hln_user::key`).
+/// The words of `hln.input` (`hln_user::key`, `hln_user::window`).
 const SPECIAL: i64 = 1 << 32;
 const REDRAW: i64 = SPECIAL | 0x100;
 const MOUSE: i64 = 1 << 41;
+const RESIZED: i64 = 1 << 44;
+const WHEEL: i64 = 1 << 45;
+const SHIFT: i64 = 1 << 36;
+const CTRL: i64 = 1 << 37;
+const ALT: i64 = 1 << 38;
 
 // Le P'tit Âne surfe à quatre pattes.
 
@@ -49,7 +58,8 @@ fn say(text: &str) {
     unsafe { log(text.as_ptr(), text.len()) }
 }
 
-/// What a word of `hln.input` means for the browser, if anything.
+/// What a word of `hln.input` means for the browser, if anything. The
+/// words that are not keys first, as the system asks.
 fn event(word: i64) -> Option<Event> {
     if word & MOUSE != 0 {
         let x = (word & 0xffff) as i32;
@@ -57,6 +67,18 @@ fn event(word: i64) -> Option<Event> {
         let left = word >> 32 & 1 != 0;
         return Some(Event::Pointer { x, y, left });
     }
+    if word & WHEEL != 0 {
+        // The system counts away from the person (up the page), the
+        // browser down the page.
+        let notches = (word >> 48) as u8 as i8;
+        return Some(Event::Wheel(-i32::from(notches)));
+    }
+    if word & RESIZED != 0 {
+        let w = (word & 0xffff) as i32;
+        let h = (word >> 16 & 0x7fff) as i32;
+        return Some(Event::Resize(w.clamp(1, ROOM_MAX), h.clamp(1, ROOM_MAX)));
+    }
+    let mods = Mods { ctrl: word & CTRL != 0, shift: word & SHIFT != 0, alt: word & ALT != 0 };
     if word & SPECIAL != 0 {
         let key = match word & 0xfff {
             1 => Key::Enter,
@@ -70,12 +92,15 @@ fn event(word: i64) -> Option<Event> {
             9 => Key::Home,
             10 => Key::End,
             11 => Key::Delete,
+            12 => Key::PageUp,
+            13 => Key::PageDown,
             _ => return None,
         };
-        return Some(Event::Key(key, Mods::NONE));
+        return Some(Event::Key(key, mods));
     }
+    // A character: Ctrl+L comes as `'l'` with Ctrl, never typed.
     let c = char::from_u32((word & 0xffff_ffff) as u32).filter(|c| !c.is_control())?;
-    Some(Event::Key(Key::Char(c), Mods::NONE))
+    Some(Event::Key(Key::Char(c), mods))
 }
 
 #[cfg(feature = "network")]
@@ -116,9 +141,20 @@ mod network {
             if post.is_some() {
                 return Err(NetError::Failed(String::from("Les formulaires envoyés (POST) attendent le système.")));
             }
-            if url.scheme != "https" {
-                return Err(NetError::Unsupported);
-            }
+            // The system opens `https` only: a `http` page is asked for
+            // over `https`, as most sites answer both.
+            let url = match url.scheme.as_str() {
+                "https" => url.clone(),
+                "http" => {
+                    let mut secure = url.clone();
+                    secure.scheme = String::from("https");
+                    if secure.port == Some(80) {
+                        secure.port = None;
+                    }
+                    secure
+                }
+                _ => return Err(NetError::Unsupported),
+            };
             let address = url.to_string();
             let mut body: Vec<u8> = Vec::with_capacity(CAPACITY);
             // SAFETY: the host reads the address and writes at most
@@ -132,7 +168,7 @@ mod network {
             // SAFETY: the host wrote `length` bytes (at most `CAPACITY`).
             unsafe { body.set_len(length.min(CAPACITY)) };
             body.shrink_to_fit();
-            Ok(Response { url: url.clone(), status, content_type: None, body })
+            Ok(Response { url, status, content_type: None, body })
         }
     }
 }
@@ -171,14 +207,18 @@ pub extern "C" fn hln_main() -> i32 {
                 dirty = true;
             } else if let Some(e) = event(word) {
                 dirty |= browser.handle(e);
+                if let Event::Resize(..) = e {
+                    // The browser keeps a least size; the image is its own.
+                    canvas = Canvas::new(browser.width, browser.height);
+                }
             }
         }
         if dirty {
             dirty = false;
             browser.draw(&mut canvas);
-            // SAFETY: the host reads `WIDTH` × `HEIGHT` pixels at
+            // SAFETY: the host reads `width` × `height` pixels at
             // `canvas.pixels`, in this holon's memory.
-            unsafe { present(canvas.pixels.as_ptr(), WIDTH as usize, HEIGHT as usize) };
+            unsafe { present(canvas.pixels.as_ptr(), canvas.width as usize, canvas.height as usize) };
         } else if browser.busy() {
             dirty = browser.step(&mut net);
         }

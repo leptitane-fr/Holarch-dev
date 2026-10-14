@@ -6,16 +6,18 @@ license.workspace = true
 
 # The web browser as a holon: WebAssembly for the system's interpreter
 # (wasm32-unknown-unknown, integers only), the browser of `hln-browser`
-# in its window. Without the `network` feature it imports only what the
-# system gives today (`hln.log`, `hln.present`, `hln.input`) and its pages
-# say honestly that the network is not there yet; with it, it also imports
-# `hln.fetch`, proposed to the system side.
+# in its window. With the `network` feature (the default) it also imports
+# `hln.fetch`, which the system gives a holon holding the `network` right;
+# without it (`--no-default-features`) it imports only `hln.log`,
+# `hln.present` and `hln.input`, and its pages say the network is not
+# there.
 [lib]
 crate-type = ["cdylib"]
 test = false
 bench = false
 
 [features]
+default = ["network"]
 network = []
 
 [dependencies]
