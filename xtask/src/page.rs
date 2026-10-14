@@ -13,19 +13,26 @@ use std::time::Instant;
 /// Fetches an address with curl: the final address, its content type and
 /// its body.
 pub fn fetch(url: &str) -> Result<(String, Option<String>, Vec<u8>)> {
-    let out = Command::new("curl")
-        .args([
-            "-sSL",
-            "--max-time",
-            "20",
-            "-A",
-            "Mozilla/5.0 (compatible; hln-web)",
-            "-w",
-            "\n%{url_effective}\n%{content_type}\n%{http_code}",
-            url,
-        ])
-        .output()
-        .map_err(|e| format!("curl: {e}"))?;
+    fetch_with(url, None).map(|(u, t, _, b)| (u, t, b))
+}
+
+/// Fetches an address with curl, posting `post` as a form if given: the
+/// final address, its content type, its status and its body.
+pub fn fetch_with(url: &str, post: Option<&str>) -> Result<(String, Option<String>, u16, Vec<u8>)> {
+    let mut curl = Command::new("curl");
+    curl.args([
+        "-sSL",
+        "--max-time",
+        "20",
+        "-A",
+        "Mozilla/5.0 (compatible; hln-web)",
+        "-w",
+        "\n%{url_effective}\n%{content_type}\n%{http_code}",
+    ]);
+    if let Some(body) = post {
+        curl.args(["--data", body]);
+    }
+    let out = curl.arg(url).output().map_err(|e| format!("curl: {e}"))?;
     if !out.status.success() {
         return Err(format!("curl: {}", String::from_utf8_lossy(&out.stderr).trim()));
     }
@@ -42,7 +49,7 @@ pub fn fetch(url: &str) -> Result<(String, Option<String>, Vec<u8>)> {
     if code.starts_with('4') || code.starts_with('5') {
         eprintln!("xtask: HTTP {code} for {url}");
     }
-    Ok((url, (!ctype.is_empty()).then_some(ctype), body))
+    Ok((url, (!ctype.is_empty()).then_some(ctype), code.parse().unwrap_or(0), body))
 }
 
 pub fn run(args: &[String]) -> Result {

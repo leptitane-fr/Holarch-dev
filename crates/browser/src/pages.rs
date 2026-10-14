@@ -1,31 +1,37 @@
-//! The browser's own pages (`about:`), written in HTML and drawn by the
-//! engine like any other: the home page, bookmarks, history, help, what
-//! the browser can do, and the pages that say why a page did not come.
-//! Everything here is in French: the person reads it.
+//! The browser's own pages (`about:`), and the pages it shows when one
+//! cannot be opened. All in French, none naming the product.
 
 use crate::net::NetError;
 use alloc::format;
 use alloc::string::{String, ToString};
 use hln_web::url::Url;
 
-/// A page remembered: its title and its address.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Mark {
-    pub title: String,
-    pub url: Url,
-}
-
-/// What the browser's pages show of the browser.
-pub struct Book<'a> {
-    pub bookmarks: &'a [Mark],
-    /// Pages visited, the oldest first.
-    pub visited: &'a [Mark],
-    /// Where searches go (the words are appended).
-    pub search: &'a str,
-}
+/// What every page of the browser shares: dark, like the browser around it.
+const STYLE: &str = "<style>
+body { margin: 0; background: #1d2027; color: #e4e6ec; font-family: Manrope, sans-serif; font-size: 15px; line-height: 1.5 }
+main { max-width: 720px; margin: 0 auto; padding: 40px 28px }
+h1 { font-size: 28px; margin: 0 0 6px 0; color: #ffffff }
+h2 { font-size: 18px; margin: 28px 0 8px 0; color: #ffffff }
+p { margin: 8px 0 }
+a { color: #8fb4ff; text-decoration: none }
+.doux { color: #9aa1b0 }
+.carte { background: #272b34; border: 1px solid #343946; border-radius: 12px; padding: 14px 18px; margin: 12px 0 }
+ul.liste { list-style: none; padding: 0; margin: 0 }
+ul.liste li { padding: 8px 0; border-bottom: 1px solid #2f3440 }
+.adresse { color: #9aa1b0; font-size: 13px }
+.tuiles { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 16px }
+.tuile { flex: 0 0 150px; background: #272b34; border: 1px solid #343946; border-radius: 12px; padding: 12px 14px }
+.tuile b { display: block; color: #ffffff }
+form { display: flex; gap: 8px; margin: 24px 0 }
+input { flex: none; width: 520px; font-size: 16px; padding: 10px 14px; border-radius: 22px; border: 1px solid #3d4352; background: #14161b; color: #e4e6ec }
+button { font-size: 15px; padding: 10px 18px; border-radius: 22px; border: 0; background: #3d6fe0; color: #ffffff }
+kbd { font-family: monospace; background: #2f3440; border-radius: 4px; padding: 1px 6px; font-size: 13px }
+table { border-collapse: collapse }
+td { padding: 4px 16px 4px 0; vertical-align: top }
+</style>";
 
 /// Escapes text for HTML.
-pub fn esc(text: &str) -> String {
+pub fn escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
         match c {
@@ -40,226 +46,184 @@ pub fn esc(text: &str) -> String {
     out
 }
 
-const STYLE: &str = "
-body { margin: 0; background: #12141a; color: #e3e6ec; font-family: Manrope, sans-serif; font-size: 15px; line-height: 1.5 }
-main { max-width: 720px; margin: 0 auto; padding: 32px 24px 48px }
-h1 { font-size: 28px; margin: 0 0 6px; color: #f4f6fa }
-h2 { font-size: 18px; margin: 28px 0 10px; color: #c9d2e3 }
-p.sous { color: #8d96a8; margin: 0 0 24px }
-a { color: #8fb4ff; text-decoration: none }
-code, kbd { font-family: 'JetBrains Mono', monospace; font-size: 13px; background: #222632; border-radius: 4px; padding: 1px 5px }
-.carte { background: #1b1e27; border: 1px solid #2a2f3c; border-radius: 12px; padding: 16px 20px; margin: 12px 0 }
-.tuiles { display: flex; flex-wrap: wrap; gap: 10px }
-.tuile { flex: 0 0 160px; background: #1b1e27; border: 1px solid #2a2f3c; border-radius: 10px; padding: 10px 12px; overflow: hidden }
-.tuile b { display: block; color: #e3e6ec; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
-.tuile span { display: block; color: #7d8699; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
-form.cherche { display: flex; gap: 8px; margin: 8px 0 }
-form.cherche input { flex: 1 1 auto; font-size: 16px; padding: 9px 14px; border-radius: 22px; border: 1px solid #3a4152; background: #1b1e27; color: #e3e6ec }
-form.cherche button { font-size: 15px; padding: 9px 18px; border-radius: 22px; border: 0; background: #7aa2f7; color: #0d1220; font-weight: bold }
-ul.liste { list-style: none; padding: 0; margin: 0 }
-ul.liste li { padding: 6px 0; border-bottom: 1px solid #232733 }
-ul.liste li span { color: #7d8699; font-size: 12px; margin-left: 8px }
-table { border-collapse: collapse; width: 100% }
-td { padding: 5px 8px; border-bottom: 1px solid #232733; vertical-align: top }
-td:first-child { white-space: nowrap; width: 38% }
-.vide { color: #7d8699; font-style: italic }
-.erreur h1 { color: #ffb4a8 }
-";
-
-fn shell(title: &str, body: &str) -> String {
+fn document(title: &str, body: &str) -> String {
     format!(
-        "<!doctype html><html lang=fr><head><meta charset=utf-8><title>{}</title><style>{STYLE}</style></head>\
-         <body><main>{body}</main></body></html>",
-        esc(title)
+        "<!doctype html><html lang=fr><head><meta charset=utf-8><title>{}</title>{STYLE}</head><body><main>{body}</main></body></html>",
+        escape(title)
     )
 }
 
-/// The search box, sending its words to `search`.
-fn search_form(search: &str) -> String {
-    let (action, name) = match search.split_once('?') {
-        Some((a, q)) => (a, q.trim_end_matches('=')),
-        None => (search, "q"),
-    };
-    format!(
-        "<form class=cherche action='{}'><input name='{}' autofocus placeholder='Rechercher sur le Web'>\
-         <button>Rechercher</button></form>",
-        esc(action),
-        esc(name)
-    )
+/// A saved address: a bookmark or a line of history.
+#[derive(Clone)]
+pub struct Saved {
+    pub title: String,
+    pub url: Url,
 }
 
-fn tiles(marks: &[Mark]) -> String {
-    let mut out = String::from("<div class=tuiles>");
-    for m in marks {
-        let title = if m.title.is_empty() { m.url.pretty() } else { m.title.clone() };
-        out.push_str(&format!(
-            "<a class=tuile href='{}'><b>{}</b><span>{}</span></a>",
-            esc(&m.url.to_string()),
-            esc(&title),
-            esc(&m.url.pretty())
-        ));
+impl Saved {
+    /// What a list shows of it: its title, else its address.
+    pub fn label(&self) -> String {
+        if self.title.trim().is_empty() { self.url.pretty() } else { String::from(self.title.trim()) }
     }
-    out.push_str("</div>");
-    out
 }
 
-fn list(marks: &[Mark], newest_first: bool) -> String {
-    if marks.is_empty() {
-        return String::from("<p class=vide>Rien pour l'instant.</p>");
+fn links(items: &[Saved], empty: &str) -> String {
+    if items.is_empty() {
+        return format!("<p class=doux>{empty}</p>");
     }
     let mut out = String::from("<ul class=liste>");
-    let mut push = |m: &Mark| {
-        let title = if m.title.is_empty() { m.url.pretty() } else { m.title.clone() };
-        out.push_str(&format!(
-            "<li><a href='{}'>{}</a><span>{}</span></li>",
-            esc(&m.url.to_string()),
-            esc(&title),
-            esc(&m.url.pretty())
-        ));
-    };
-    if newest_first {
-        marks.iter().rev().for_each(&mut push);
-    } else {
-        marks.iter().for_each(&mut push);
+    for s in items {
+        let href = escape(&s.url.to_string());
+        out += &format!(
+            "<li><a href=\"{href}\">{}</a><br><span class=adresse>{}</span></li>",
+            escape(&s.label()),
+            escape(&s.url.pretty())
+        );
     }
-    out.push_str("</ul>");
-    out
+    out + "</ul>"
 }
 
-// Le P'tit Âne trotte jusqu'aux pages du navigateur sans réseau.
-
-/// The page `about:<name>`, if the browser has one by that name.
-pub fn about(name: &str, book: &Book) -> Option<String> {
-    let name = name.trim_end_matches('/');
+/// The browser's own page `about:<name>`, if it has one.
+pub fn about(name: &str, search: &str, bookmarks: &[Saved], history: &[Saved]) -> Option<String> {
     Some(match name {
-        "" | "accueil" | "blank" | "home" | "newtab" => {
-            let mut recent: alloc::vec::Vec<Mark> = alloc::vec::Vec::new();
-            for m in book.visited.iter().rev() {
-                if !recent.iter().any(|r| r.url == m.url) {
-                    recent.push(m.clone());
-                }
-                if recent.len() == 6 {
-                    break;
-                }
+        "accueil" | "blank" | "" => {
+            let mut tiles = String::new();
+            for s in bookmarks.iter().take(8) {
+                tiles += &format!(
+                    "<a class=tuile href=\"{}\"><b>{}</b><span class=adresse>{}</span></a>",
+                    escape(&s.url.to_string()),
+                    escape(&s.label()),
+                    escape(&s.url.authority())
+                );
             }
-            let mut body =
-                format!("<h1>Nouvel onglet</h1><p class=sous>Où allons-nous ?</p>{}", search_form(book.search));
-            body.push_str("<h2>Favoris</h2>");
-            if book.bookmarks.is_empty() {
-                body.push_str("<p class=vide>Aucun favori : l'étoile de la barre d'adresse en ajoute un.</p>");
-            } else {
-                body.push_str(&tiles(book.bookmarks));
+            if tiles.is_empty() {
+                tiles = String::from(
+                    "<a class=tuile href=\"about:essai\"><b>Page d'essai</b><span class=adresse>ce que le moteur sait dessiner</span></a>\
+                     <a class=tuile href=\"about:aide\"><b>Aide</b><span class=adresse>les touches et les boutons</span></a>",
+                );
             }
-            if !recent.is_empty() {
-                body.push_str("<h2>Récemment</h2>");
-                body.push_str(&tiles(&recent));
-            }
-            body.push_str(
-                "<p class=sous style='margin-top:28px'><a href='about:aide'>Aide et raccourcis</a> · \
-                 <a href='about:a-propos'>Ce que sait faire ce navigateur</a> · <a href='about:essai'>Page d'essai</a></p>",
-            );
-            shell("Nouvel onglet", &body)
+            let action = escape(search.split('?').next().unwrap_or(search));
+            let field = search.split('?').nth(1).and_then(|q| q.split('=').next()).unwrap_or("q");
+            document(
+                "Nouvel onglet",
+                &format!(
+                    "<h1>Où aller ?</h1><p class=doux>Tapez une adresse dans la barre du haut, ou cherchez ici.</p>\
+                     <form action=\"{action}\"><input name=\"{}\" placeholder=\"Rechercher sur le Web\" autofocus><button>Chercher</button></form>\
+                     <h2>Favoris</h2><div class=tuiles>{tiles}</div>",
+                    escape(field)
+                ),
+            )
         }
-        "favoris" => shell("Favoris", &format!("<h1>Favoris</h1>{}", list(book.bookmarks, false))),
-        "historique" => shell(
-            "Historique",
+        "favoris" => document(
+            "Favoris",
             &format!(
-                "<h1>Historique</h1><p class=sous>Les pages de cette session, la plus récente en haut. \
-                 Rien n'est gardé après la fermeture.</p>{}",
-                list(book.visited, true)
+                "<h1>Favoris</h1><p class=doux>L'étoile de la barre d'adresse ajoute la page ouverte, ou l'enlève.</p>{}",
+                links(bookmarks, "Aucun favori pour l'instant.")
             ),
         ),
-        "aide" => shell("Aide", HELP),
-        "a-propos" => shell("À propos du navigateur", ABOUT),
+        "historique" => document(
+            "Historique",
+            &format!(
+                "<h1>Historique</h1><p class=doux>Les pages ouvertes depuis le démarrage, la plus récente en premier. Rien n'est gardé à l'arrêt.</p>{}",
+                links(history, "Aucune page ouverte pour l'instant.")
+            ),
+        ),
+        "aide" => document(
+            "Aide",
+            "<h1>Aide</h1>\
+             <h2>Les boutons</h2><table>\
+             <tr><td>← →</td><td>page précédente, page suivante</td></tr>\
+             <tr><td>⟳</td><td>recharger la page (pendant un chargement : l'arrêter)</td></tr>\
+             <tr><td>⌂</td><td>la page d'accueil</td></tr>\
+             <tr><td>☆</td><td>ajouter la page aux favoris, ou l'en retirer</td></tr>\
+             <tr><td>≡</td><td>le menu : onglets, favoris, historique, recherche dans la page</td></tr></table>\
+             <h2>Les touches</h2><table>\
+             <tr><td><kbd>Ctrl</kbd> <kbd>L</kbd></td><td>aller à la barre d'adresse</td></tr>\
+             <tr><td><kbd>Ctrl</kbd> <kbd>T</kbd> / <kbd>W</kbd></td><td>ouvrir / fermer un onglet</td></tr>\
+             <tr><td><kbd>Ctrl</kbd> <kbd>Tab</kbd></td><td>l'onglet suivant</td></tr>\
+             <tr><td><kbd>Ctrl</kbd> <kbd>F</kbd></td><td>rechercher dans la page (<kbd>Entrée</kbd> : l'endroit suivant)</td></tr>\
+             <tr><td><kbd>Ctrl</kbd> <kbd>D</kbd></td><td>ajouter aux favoris</td></tr>\
+             <tr><td><kbd>Ctrl</kbd> <kbd>R</kbd></td><td>recharger</td></tr>\
+             <tr><td><kbd>Alt</kbd> <kbd>←</kbd> / <kbd>→</kbd></td><td>page précédente / suivante</td></tr>\
+             <tr><td><kbd>Tab</kbd></td><td>le lien ou le champ suivant ; <kbd>Entrée</kbd> l'ouvre</td></tr>\
+             <tr><td><kbd>↑</kbd> <kbd>↓</kbd> <kbd>Espace</kbd></td><td>faire défiler la page</td></tr>\
+             <tr><td><kbd>Échap</kbd></td><td>quitter un champ, la recherche ou le menu</td></tr></table>",
+        ),
+        "a-propos" => document(
+            "À propos",
+            "<h1>À propos du navigateur</h1>\
+             <p>Un navigateur écrit de zéro : il lit le HTML et le CSS, place les blocs, les lignes, les tableaux et les boîtes flexibles, puis dessine la page lui-même, sans aucun calcul en virgule flottante.</p>\
+             <div class=carte><b>Ce qu'il ne fait pas encore</b><p class=doux>Les images (leur place seulement), la grille CSS, le JavaScript. Les sites qui en dépendent s'affichent incomplets.</p></div>\
+             <div class=carte><b>Ce qu'il ne fera jamais</b><p class=doux>Envoyer quoi que ce soit sans que vous l'ayez demandé. Chaque site restera enfermé dans son propre holon.</p></div>\
+             <p class=doux>Polices : Manrope et JetBrains Mono, sous licence SIL Open Font License 1.1.</p>",
+        ),
         "essai" => String::from(include_str!("../../../docs/essais/page.html")),
         _ => return None,
     })
 }
 
-const HELP: &str = "<h1>Aide</h1><p class=sous>Le clavier et la souris dans le navigateur.</p>
-<div class=carte><table>
-<tr><td><kbd>Échap</kbd></td><td>aller à la barre d'adresse (ou en sortir)</td></tr>
-<tr><td><kbd>Entrée</kbd> dans la barre</td><td>ouvrir l'adresse, ou chercher les mots tapés</td></tr>
-<tr><td><kbd>↑</kbd> <kbd>↓</kbd> dans la barre</td><td>choisir une suggestion (favoris, historique)</td></tr>
-<tr><td><kbd>↑</kbd> <kbd>↓</kbd> <kbd>Espace</kbd></td><td>faire défiler la page</td></tr>
-<tr><td><kbd>Début</kbd> <kbd>Fin</kbd></td><td>haut et bas de la page</td></tr>
-<tr><td><kbd>Tab</kbd></td><td>passer d'un lien ou d'un champ au suivant ; <kbd>Entrée</kbd> l'ouvre</td></tr>
-<tr><td><kbd>Retour arrière</kbd></td><td>page précédente</td></tr>
-<tr><td><kbd>/</kbd></td><td>rechercher dans la page ; <kbd>Entrée</kbd> et <kbd>↑</kbd> passent d'un résultat à l'autre</td></tr>
-<tr><td><kbd>Ctrl</kbd> + <kbd>T</kbd>, <kbd>W</kbd>, <kbd>L</kbd>, <kbd>F</kbd>, <kbd>R</kbd>, <kbd>D</kbd></td>
-<td>nouvel onglet, fermer l'onglet, adresse, rechercher, recharger, ajouter aux favoris (quand le système transmettra la touche Ctrl)</td></tr>
-</table></div>
-<div class=carte><table>
-<tr><td>Clic sur un lien</td><td>l'ouvrir</td></tr>
-<tr><td>Clic droit sur un lien</td><td>l'ouvrir dans un nouvel onglet</td></tr>
-<tr><td>Molette, barre de droite</td><td>faire défiler</td></tr>
-<tr><td>Menu ≡</td><td>onglets, favoris, historique, code source, aide</td></tr>
-</table></div>";
-
-const ABOUT: &str = "<h1>À propos du navigateur</h1>
-<p class=sous>Un navigateur écrit de zéro, sans bibliothèque, pour tourner dans un holon.</p>
-<h2>Ce qu'il sait faire</h2>
-<div class=carte><ul>
-<li>lire le HTML comme les grands navigateurs (balises implicites, tableaux, entités, jeux de caractères) ;</li>
-<li>appliquer le CSS : cascade et spécificité, sélecteurs complets, <code>@media</code>, <code>@import</code>,
-<code>var()</code>, <code>calc()</code>, couleurs <code>rgb</code> et <code>hsl</code> ;</li>
-<li>mettre en page : blocs, lignes, flottants, tableaux (fusion de cellules), flexbox, positions absolue et fixe ;</li>
-<li>dessiner le texte lissé (Manrope, JetBrains Mono), les bordures arrondies, les soulignements ;</li>
-<li>onglets, historique, favoris, formulaires (GET et POST), recherche dans la page, code source.</li>
-</ul></div>
-<h2>Ce qu'il ne sait pas encore faire</h2>
-<div class=carte><ul>
-<li>le JavaScript : les pages qui en dépendent restent incomplètes ;</li>
-<li>les images (une place leur est gardée) et la grille CSS (rendue en blocs) ;</li>
-<li>le réseau dépend du système : le holon attend le droit <code>network</code>.</li>
-</ul></div>";
-
-/// The page saying why `url` did not come.
-pub fn error(url: &Url, err: &NetError) -> String {
-    let (title, text) = match err {
-        NetError::NoRight => (
-            "Pas encore d'accès au réseau",
-            String::from(
-                "<p>Ce holon n'a pas encore le droit d'aller sur le réseau : le système ne le lui donne pas \
-                 aujourd'hui. Les pages du navigateur (<a href='about:accueil'>accueil</a>, \
-                 <a href='about:aide'>aide</a>, <a href='about:essai'>page d'essai</a>) marchent sans lui.</p>\
-                 <p>Dès que le système accordera le droit <code>network</code>, avec votre accord à \
-                 l'installation, les pages du Web s'ouvriront ici.</p>",
+/// The page shown when `url` could not be opened.
+pub fn error(url: &Url, error: &NetError) -> String {
+    let address = escape(&url.pretty());
+    let again = escape(&url.to_string());
+    match error {
+        NetError::NoRight => document(
+            "Pas de réseau",
+            &format!(
+                "<h1>Pas encore de réseau</h1>\
+                 <p>Le navigateur n'a pas pu ouvrir <b>{address}</b> : le système ne lui a pas donné le droit d'aller sur le réseau.</p>\
+                 <div class=carte><p class=doux>Chaque holon ne reçoit que les droits qu'on lui accorde. Celui-ci n'a pas encore le droit « réseau » : il ne peut montrer que ses propres pages. Rien n'a été envoyé.</p></div>\
+                 <p><a href=\"about:accueil\">Accueil</a> · <a href=\"about:essai\">Page d'essai</a> · <a href=\"about:aide\">Aide</a></p>"
             ),
         ),
-        NetError::Unsupported => (
+        NetError::Unsupported => document(
             "Adresse non prise en charge",
-            format!("<p>Ce navigateur n'ouvre pas les adresses <code>{}:</code>.</p>", esc(&url.scheme)),
-        ),
-        NetError::Failed(why) => (
-            "La page n'a pas pu être chargée",
-            format!(
-                "<p>{}</p><p>Vérifiez l'adresse, ou réessayez avec <kbd>Ctrl</kbd> + <kbd>R</kbd> ou le bouton ⟳.</p>",
-                esc(why)
+            &format!(
+                "<h1>Adresse non prise en charge</h1>\
+                 <p>Le navigateur n'ouvre que les pages du Web (<b>http</b> et <b>https</b>) et les siennes (<b>about:</b>). <b>{address}</b> n'en est pas une.</p>\
+                 <p><a href=\"about:accueil\">Accueil</a></p>"
             ),
         ),
-    };
-    let body = format!(
-        "<div class=erreur><h1>{title}</h1><p class=sous><code>{}</code></p>{text}</div>",
-        esc(&url.to_string())
-    );
-    shell(title, &body)
+        NetError::Failed(why) => document(
+            "Page introuvable",
+            &format!(
+                "<h1>Impossible d'ouvrir la page</h1>\
+                 <p><b>{address}</b> n'a pas répondu.</p>\
+                 <div class=carte><p class=doux>{}</p></div>\
+                 <p><a href=\"{again}\">Réessayer</a> · <a href=\"about:accueil\">Accueil</a></p>",
+                escape(why)
+            ),
+        ),
+    }
+}
+
+/// The page shown for an `about:` address the browser does not have.
+pub fn unknown(name: &str) -> String {
+    document(
+        "Page inconnue",
+        &format!(
+            "<h1>Page inconnue</h1><p>Le navigateur n'a pas de page <b>about:{}</b>. Les siennes : \
+             <a href=\"about:accueil\">accueil</a>, <a href=\"about:favoris\">favoris</a>, <a href=\"about:historique\">historique</a>, \
+             <a href=\"about:aide\">aide</a>, <a href=\"about:a-propos\">a-propos</a>, <a href=\"about:essai\">essai</a>.</p>",
+            escape(name)
+        ),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec;
 
     #[test]
-    fn pages_escape_what_they_show() {
-        let marks = vec![Mark { title: String::from("<b>Âne</b>"), url: Url::parse("https://exemple.fr/").unwrap() }];
-        let book = Book { bookmarks: &marks, visited: &marks, search: "https://cherche.fr/?q=" };
-        let home = about("accueil", &book).unwrap();
-        assert!(home.contains("&lt;b&gt;Âne") && !home.contains("<b>Âne"));
-        assert!(home.contains("action='https://cherche.fr/'") && home.contains("name='q'"));
-        assert!(about("inconnue", &book).is_none());
-        let e = error(&Url::parse("ftp://x.fr/").unwrap(), &NetError::Unsupported);
-        assert!(e.contains("<code>ftp:</code>"));
+    fn pages_exist_and_escape() {
+        let s = Saved { title: String::from("<b>x</b>"), url: Url::parse("https://exemple.fr/").unwrap() };
+        let page = about("favoris", "https://html.duckduckgo.com/html/?q=", &[s], &[]).unwrap();
+        assert!(page.contains("&lt;b&gt;x&lt;/b&gt;") && !page.contains("<b>x</b>"));
+        for name in ["accueil", "historique", "aide", "a-propos", "essai"] {
+            assert!(about(name, "https://e.fr/?q=", &[], &[]).is_some(), "{name}");
+        }
+        assert!(about("rien", "", &[], &[]).is_none());
+        let accueil = about("accueil", "https://html.duckduckgo.com/html/?q=", &[], &[]).unwrap();
+        assert!(accueil.contains("action=\"https://html.duckduckgo.com/html/\"") && accueil.contains("name=\"q\""));
     }
 }

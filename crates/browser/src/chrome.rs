@@ -1,576 +1,580 @@
-//! The browser's frame, drawn around the page: the tab strip, the toolbar
-//! (back, forward, reload, home, the address bar with its lock and star,
-//! the menu), the loading bar, the scrollbar, the status bubble, the find
-//! bar, the menu and the address bar's suggestions. Dark, whatever the
-//! page. [`Geo`] places everything, for drawing and for the pointer alike.
+//! What the browser draws around the page, dark: the tabs, the bar with
+//! its buttons and the address, the progress bar, the suggestions and the
+//! menu, the find bar, the scroll bar and the bubble that shows where a
+//! link goes. [`regions`] says where each thing that can be clicked is,
+//! for drawing and for the pointer alike.
 
-use crate::{Browser, FIND, Focus, Hover, MENU, SCROLLBAR, TABS, TOP};
+use crate::{Browser, Focus};
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 use hln_type::{Face, face};
 use hln_web::paint::{Canvas, Rect};
 use hln_web::style::Color;
 
-const STRIP: Color = Color::rgb(0x16, 0x18, 0x1e);
-const BAR: Color = Color::rgb(0x26, 0x2a, 0x34);
-const FIELD: Color = Color::rgb(0x16, 0x18, 0x1e);
-const HOVER: Color = Color::rgb(0x36, 0x3b, 0x49);
-const POPUP: Color = Color::rgb(0x2c, 0x30, 0x3b);
-const EDGE: Color = Color::rgb(0x3e, 0x44, 0x53);
-const TEXT: Color = Color::rgb(0xe6, 0xe9, 0xef);
-const DIM: Color = Color::rgb(0x8b, 0x93, 0xa5);
-const FAINT: Color = Color::rgb(0x55, 0x5c, 0x6b);
-const ACCENT: Color = Color::rgb(0x7a, 0xa2, 0xf7);
-const GOLD: Color = Color::rgb(0xf5, 0xc4, 0x51);
+/// The height of the tabs' strip.
+pub const TABS: i32 = 34;
+/// The height of the bar under it.
+pub const BAR: i32 = 40;
+/// The height of the find bar, at the bottom, when open.
+pub const FIND: i32 = 40;
+const SCROLLBAR: i32 = 10;
+const ROW: i32 = 32;
+const MENU_WIDTH: i32 = 260;
 
-/// What lies under a point of the window.
+const STRIP: Color = Color::rgb(0x16, 0x18, 0x1d);
+const SURFACE: Color = Color::rgb(0x2a, 0x2d, 0x35);
+const FIELD: Color = Color::rgb(0x16, 0x18, 0x1d);
+const HOVER: Color = Color::rgb(0x3a, 0x3e, 0x49);
+const LINE: Color = Color::rgb(0x3a, 0x3e, 0x49);
+const TEXT: Color = Color::rgb(0xe6, 0xe8, 0xee);
+const MUTED: Color = Color::rgb(0x9a, 0xa1, 0xb0);
+const FAINT: Color = Color::rgb(0x5c, 0x62, 0x70);
+const ACCENT: Color = Color::rgb(0x6f, 0x9b, 0xff);
+const SELECTION: Color = Color::rgb(0x2f, 0x4f, 0x8f);
+const SECURE: Color = Color::rgb(0x7f, 0xd1, 0x9b);
+const STAR: Color = Color::rgb(0xff, 0xc8, 0x57);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Target {
-    Strip,
+pub enum MenuItem {
+    NewTab,
+    Find,
+    /// One of the browser's own pages (`about:<name>`).
+    Page(&'static str),
+}
+
+const MENU: [(&str, &str, MenuItem); 7] = [
+    ("Nouvel onglet", "Ctrl T", MenuItem::NewTab),
+    ("Rechercher dans la page", "Ctrl F", MenuItem::Find),
+    ("Favoris", "", MenuItem::Page("favoris")),
+    ("Historique", "Ctrl H", MenuItem::Page("historique")),
+    ("Page d'essai", "", MenuItem::Page("essai")),
+    ("Aide", "", MenuItem::Page("aide")),
+    ("À propos", "", MenuItem::Page("a-propos")),
+];
+
+/// What a click does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
     Tab(usize),
     CloseTab(usize),
     NewTab,
-    Toolbar,
     Back,
     Forward,
     Reload,
     Home,
     Address,
-    Star,
-    Menu,
-    MenuItem(usize),
     Suggestion(usize),
+    Star,
+    MenuButton,
+    Menu(MenuItem),
     FindField,
-    FindPrev,
-    FindNext,
+    /// The previous place found (`true`) or the next one.
+    FindNext(bool),
     FindClose,
-    Scrollbar,
-    Page,
+    /// The scroll bar's thumb, grabbed this far below its top.
+    Thumb(i32),
+    /// The scroll bar's track, at this height.
+    Track(i32),
+}
+
+fn ui(size: i32) -> Face {
+    face(false, false, size)
 }
 
 fn inside((x0, y0, x1, y1): Rect, x: i32, y: i32) -> bool {
     x >= x0 && x < x1 && y >= y0 && y < y1
 }
 
-/// Where everything goes, for a window `w` × `h`.
-pub struct Geo {
-    pub w: i32,
-    pub h: i32,
-    pub tabs: usize,
-    pub find: bool,
+/// How wide each tab is.
+fn tab_width(b: &Browser) -> i32 {
+    ((b.width - 48) / b.tabs.len().max(1) as i32).clamp(56, 220)
 }
 
-const BUTTON: i32 = 30;
-const SUGGESTION: i32 = 36;
+fn address_field(b: &Browser) -> Rect {
+    (152, TABS + 5, (b.width - 52).max(260), TABS + BAR - 5)
+}
 
-impl Geo {
-    fn tab_width(&self) -> i32 {
-        ((self.w - 8 - 40) / self.tabs.max(1) as i32).clamp(36, 220)
+/// The scroll bar's thumb: its top and its length, in window pixels, if
+/// the page is longer than the view.
+pub fn thumb(b: &Browser) -> Option<(i32, i32)> {
+    let (_, vy, _, vy1) = b.view();
+    let view = vy1 - vy;
+    let height = b.tab().page.layout.as_ref()?.height;
+    if height <= view {
+        return None;
     }
+    let len = (view as i64 * view as i64 / height as i64).max(24) as i32;
+    let max = (height - view).max(1);
+    let top = vy + ((view - len) as i64 * b.tab().scroll as i64 / max as i64) as i32;
+    Some((top, len))
+}
 
-    pub fn tab(&self, i: usize) -> Rect {
-        let tw = self.tab_width();
-        let x = 8 + i as i32 * tw;
-        (x, 6, x + tw - 2, TABS)
-    }
-
-    pub fn close(&self, i: usize) -> Rect {
-        let t = self.tab(i);
-        (t.2 - 24, 10, t.2 - 4, 30)
-    }
-
-    pub fn new_tab(&self) -> Rect {
-        let x = (8 + self.tabs as i32 * self.tab_width() + 4).min(self.w - 30);
-        (x, 8, x + 26, 32)
-    }
-
-    /// The toolbar's buttons: back, forward, reload, home.
-    pub fn button(&self, k: i32) -> Rect {
-        let x = 6 + k * (BUTTON + 2);
-        (x, TABS + 5, x + BUTTON, TABS + 5 + BUTTON)
-    }
-
-    pub fn menu_button(&self) -> Rect {
-        (self.w - 6 - BUTTON, TABS + 5, self.w - 6, TABS + 5 + BUTTON)
-    }
-
-    pub fn address(&self) -> Rect {
-        (self.button(4).0 + 4, TABS + 6, self.w - 12 - BUTTON, TOP - 6)
-    }
-
-    pub fn star(&self) -> Rect {
-        let a = self.address();
-        (a.2 - 30, a.1, a.2 - 2, a.3)
-    }
-
-    /// The height of a menu item: smaller in a short window, for all of
-    /// them to show.
-    fn item(&self) -> i32 {
-        ((self.h - TOP - 8) / MENU.len() as i32).clamp(20, 30)
-    }
-
-    pub fn menu(&self) -> Rect {
-        (self.w - 262, TOP - 2, self.w - 6, TOP + 4 + self.item() * MENU.len() as i32)
-    }
-
-    pub fn menu_item(&self, i: usize) -> Rect {
-        let m = self.menu();
-        let y = m.1 + 3 + i as i32 * self.item();
-        (m.0 + 4, y, m.2 - 4, y + self.item())
-    }
-
-    pub fn suggestion(&self, i: usize) -> Rect {
-        let a = self.address();
-        let y = TOP + 2 + i as i32 * SUGGESTION;
-        (a.0, y, a.2, y + SUGGESTION)
-    }
-
-    pub fn content(&self) -> Rect {
-        (0, TOP, self.w - SCROLLBAR, self.bottom())
-    }
-
-    fn bottom(&self) -> i32 {
-        if self.find { self.h - FIND } else { self.h }
-    }
-
-    pub fn scrollbar(&self) -> Rect {
-        (self.w - SCROLLBAR, TOP, self.w, self.bottom())
-    }
-
-    pub fn find_field(&self) -> Rect {
-        (104, self.h - FIND + 6, (self.w - 220).max(160), self.h - 6)
-    }
-
-    pub fn find_prev(&self) -> Rect {
-        (self.w - 102, self.h - FIND + 4, self.w - 72, self.h - 4)
-    }
-
-    pub fn find_next(&self) -> Rect {
-        (self.w - 70, self.h - FIND + 4, self.w - 40, self.h - 4)
-    }
-
-    pub fn find_close(&self) -> Rect {
-        (self.w - 36, self.h - FIND + 4, self.w - 6, self.h - 4)
-    }
-
-    /// What is under (x, y), popups first.
-    pub fn target(&self, b: &Browser, x: i32, y: i32) -> Target {
-        if b.menu {
-            for i in 0..MENU.len() {
-                if inside(self.menu_item(i), x, y) {
-                    return Target::MenuItem(i);
-                }
-            }
+/// Everything that can be clicked, from bottom to top.
+fn regions(b: &Browser) -> Vec<(Rect, Action)> {
+    let mut out = Vec::new();
+    let tw = tab_width(b);
+    for i in 0..b.tabs.len() {
+        let x = i as i32 * tw;
+        out.push(((x, 4, x + tw - 2, TABS), Action::Tab(i)));
+        if tw >= 90 || i == b.current {
+            out.push(((x + tw - 28, 9, x + tw - 6, TABS - 3), Action::CloseTab(i)));
         }
-        if b.focus == Focus::Address {
-            for i in 0..b.suggestions.len() {
-                if inside(self.suggestion(i), x, y) {
-                    return Target::Suggestion(i);
-                }
-            }
-        }
-        if y < TABS {
-            for i in 0..self.tabs {
-                if inside(self.close(i), x, y) && self.tab_width() > 80 {
-                    return Target::CloseTab(i);
-                }
-                if inside(self.tab(i), x, y) {
-                    return Target::Tab(i);
-                }
-            }
-            return if inside(self.new_tab(), x, y) { Target::NewTab } else { Target::Strip };
-        }
-        if y < TOP {
-            let buttons = [Target::Back, Target::Forward, Target::Reload, Target::Home];
-            for (k, t) in buttons.into_iter().enumerate() {
-                if inside(self.button(k as i32), x, y) {
-                    return t;
-                }
-            }
-            return if inside(self.star(), x, y) {
-                Target::Star
-            } else if inside(self.address(), x, y) {
-                Target::Address
-            } else if inside(self.menu_button(), x, y) {
-                Target::Menu
-            } else {
-                Target::Toolbar
-            };
-        }
-        if self.find && y >= self.h - FIND {
-            return if inside(self.find_prev(), x, y) {
-                Target::FindPrev
-            } else if inside(self.find_next(), x, y) {
-                Target::FindNext
-            } else if inside(self.find_close(), x, y) {
-                Target::FindClose
-            } else {
-                Target::FindField
-            };
-        }
-        if inside(self.scrollbar(), x, y) { Target::Scrollbar } else { Target::Page }
     }
-}
-
-fn center((x0, y0, x1, y1): Rect) -> (i32, i32) {
-    ((x0 + x1) / 2, (y0 + y1) / 2)
-}
-
-/// Writes `text` cut to `width` (with « … »), its capitals centered on
-/// `middle`; returns where it ends.
-fn label(canvas: &mut Canvas, x: i32, middle: i32, text: &str, f: &Face, color: Color, width: i32) -> i32 {
-    let (kept, cut) = f.fit(text, width);
-    let top = f.top_for(middle);
-    let end = canvas.text(x, top, &text[..kept], f, color, false);
-    if cut { canvas.text(end, top, "…", f, color, false) } else { end }
-}
-
-fn hovered(b: &Browser, t: Target) -> bool {
-    b.hover == Hover::Chrome(t)
-}
-
-fn button_back(canvas: &mut Canvas, b: &Browser, t: Target, r: Rect) {
-    if hovered(b, t) {
-        canvas.fill_rounded(r, 8, HOVER);
+    let plus = b.tabs.len() as i32 * tw + 4;
+    out.push(((plus, 6, plus + 28, TABS - 2), Action::NewTab));
+    let y = TABS + 4;
+    for (i, a) in [Action::Back, Action::Forward, Action::Reload, Action::Home].into_iter().enumerate() {
+        let x = 8 + i as i32 * 35;
+        out.push(((x, y, x + 32, y + 32), a));
     }
+    let field = address_field(b);
+    out.push((field, Action::Address));
+    out.push(((field.2 - 34, field.1, field.2, field.3), Action::Star));
+    out.push(((b.width - 44, y, b.width - 8, y + 32), Action::MenuButton));
+    if let Some((top, len)) = thumb(b) {
+        let (_, vy, vx1, vy1) = b.view();
+        out.push(((vx1 - SCROLLBAR - 2, vy, vx1, vy1), Action::Track(0)));
+        out.push(((vx1 - SCROLLBAR - 2, top, vx1, top + len), Action::Thumb(0)));
+    }
+    if b.finding {
+        let y = b.height - FIND;
+        out.push(((12, y + 6, 332, y + FIND - 6), Action::FindField));
+        out.push(((420, y + 4, 452, y + FIND - 4), Action::FindNext(true)));
+        out.push(((454, y + 4, 486, y + FIND - 4), Action::FindNext(false)));
+        out.push(((b.width - 40, y + 4, b.width - 8, y + FIND - 4), Action::FindClose));
+    }
+    for i in 0..b.suggestions().len() {
+        let top = TABS + BAR + i as i32 * ROW;
+        out.push(((field.0, top, field.2, top + ROW), Action::Suggestion(i)));
+    }
+    if b.menu {
+        let x = b.width - MENU_WIDTH - 8;
+        for (i, (_, _, item)) in MENU.iter().enumerate() {
+            let top = TABS + BAR + 4 + i as i32 * ROW;
+            out.push(((x, top, x + MENU_WIDTH, top + ROW), Action::Menu(*item)));
+        }
+    }
+    out
 }
 
-fn arrow(canvas: &mut Canvas, (cx, cy): (i32, i32), dir: i32, color: Color) {
-    canvas.line((cx - 7, cy), (cx + 7, cy), 2, color);
-    let tip = cx + 7 * dir;
-    canvas.line((tip, cy), (tip - 6 * dir, cy - 6), 2, color);
-    canvas.line((tip, cy), (tip - 6 * dir, cy + 6), 2, color);
+/// What is under (x, y) of the window, if it is the browser's.
+pub fn hit(b: &Browser, x: i32, y: i32) -> Option<Action> {
+    let (rect, action) = regions(b).into_iter().rev().find(|(r, _)| inside(*r, x, y))?;
+    Some(match action {
+        Action::Thumb(_) => Action::Thumb(y - rect.1),
+        Action::Track(_) => Action::Track(y),
+        a => a,
+    })
 }
 
-fn reload(canvas: &mut Canvas, (cx, cy): (i32, i32), color: Color, under: Color) {
-    canvas.ring((cx - 7, cy - 7, cx + 8, cy + 8), 8, 2, color);
-    canvas.fill((cx + 1, cy - 8, cx + 9, cy), under);
-    canvas.line((cx + 1, cy - 6), (cx - 3, cy - 10), 2, color);
-    canvas.line((cx + 1, cy - 6), (cx - 3, cy - 2), 2, color);
+/// The middle of what does `action`, if it is shown.
+#[cfg(test)]
+pub fn center(b: &Browser, action: Action) -> Option<(i32, i32)> {
+    regions(b).into_iter().find(|(_, a)| *a == action).map(|(r, _)| ((r.0 + r.2) / 2, (r.1 + r.3) / 2))
 }
 
-fn house(canvas: &mut Canvas, (cx, cy): (i32, i32), color: Color) {
-    canvas.line((cx - 8, cy - 1), (cx, cy - 8), 2, color);
-    canvas.line((cx, cy - 8), (cx + 8, cy - 1), 2, color);
-    canvas.ring((cx - 5, cy - 2, cx + 6, cy + 8), 1, 2, color);
+fn hovered(b: &Browser, rect: Rect) -> bool {
+    inside(rect, b.pointer.0, b.pointer.1)
 }
 
-fn lock(canvas: &mut Canvas, x: i32, cy: i32, color: Color) {
-    canvas.ring((x + 1, cy - 8, x + 9, cy + 1), 4, 2, color);
-    canvas.fill_rounded((x, cy - 2, x + 10, cy + 6), 2, color);
-}
+// ---------------------------------------------------------------- icons
 
-/// The star's points, thousandths of its radius, from the top clockwise.
-const STAR: [(i32, i32); 10] = [
-    (0, -1000),
-    (588, -809),
-    (951, -309),
-    (951, 309),
-    (588, 809),
+/// Cosines and sines of the sixteen directions, in thousandths, from east
+/// turning clockwise (the window's y goes down).
+const ROSE: [(i32, i32); 16] = [
+    (1000, 0),
+    (924, 383),
+    (707, 707),
+    (383, 924),
     (0, 1000),
-    (-588, 809),
-    (-951, 309),
-    (-951, -309),
-    (-588, -809),
+    (-383, 924),
+    (-707, 707),
+    (-924, 383),
+    (-1000, 0),
+    (-924, -383),
+    (-707, -707),
+    (-383, -924),
+    (0, -1000),
+    (383, -924),
+    (707, -707),
+    (924, -383),
 ];
 
-/// Whether (x, y) lies in the polygon `points` (even-odd rule).
-fn in_polygon(points: &[(i32, i32)], x: i32, y: i32) -> bool {
-    let mut inside = false;
-    let mut j = points.len() - 1;
-    for i in 0..points.len() {
-        let ((xi, yi), (xj, yj)) = (points[i], points[j]);
-        if (yi > y) != (yj > y) && x < xi + (i64::from(xj - xi) * i64::from(y - yi) / i64::from(yj - yi)) as i32 {
-            inside = !inside;
-        }
-        j = i;
-    }
-    inside
+fn at((cx, cy): (i32, i32), (c, s): (i32, i32), r: i32) -> (i32, i32) {
+    (cx + c * r / 1000, cy + s * r / 1000)
 }
 
-/// A five-pointed star of radius `r` pixels, smoothed (16 samples a
-/// pixel).
-fn star(canvas: &mut Canvas, (cx, cy): (i32, i32), r: i32, color: Color) {
-    let cy = cy + 1;
-    let mut points = [(0, 0); 10];
-    for (k, &(dx, dy)) in STAR.iter().enumerate() {
-        let radius = if k % 2 == 0 { r * 16 } else { r * 16 * 39 / 100 };
-        points[k] = (cx * 16 + dx * radius / 1000, cy * 16 + dy * radius / 1000);
+fn arrow(c: &mut Canvas, (cx, cy): (i32, i32), left: bool, color: Color) {
+    let d = if left { -1 } else { 1 };
+    c.line((cx - 7 * d, cy), (cx + 7 * d, cy), 2, color);
+    c.line((cx + 7 * d, cy), (cx + 2 * d, cy - 5), 2, color);
+    c.line((cx + 7 * d, cy), (cx + 2 * d, cy + 5), 2, color);
+}
+
+fn cross(c: &mut Canvas, (cx, cy): (i32, i32), r: i32, w: i32, color: Color) {
+    c.line((cx - r, cy - r), (cx + r, cy + r), w, color);
+    c.line((cx - r, cy + r), (cx + r, cy - r), w, color);
+}
+
+fn reload(c: &mut Canvas, center: (i32, i32), color: Color) {
+    // Three quarters of a circle and its arrow, at the top right.
+    for i in 1..14 {
+        c.line(at(center, ROSE[i], 7), at(center, ROSE[i + 1], 7), 2, color);
     }
-    for y in cy - r - 1..=cy + r {
-        for x in cx - r - 1..=cx + r {
-            let mut cover = 0;
-            for sy in 0..4 {
-                for sx in 0..4 {
-                    cover += u32::from(in_polygon(&points, x * 16 + sx * 4 + 2, y * 16 + sy * 4 + 2));
-                }
-            }
-            if cover > 0 {
-                canvas.blend(x, y, color, cover * 255 / 16);
+    let end = at(center, ROSE[14], 7);
+    c.line(end, (end.0 + 5, end.1), 2, color);
+    c.line(end, (end.0, end.1 - 5), 2, color);
+}
+
+fn house(c: &mut Canvas, (cx, cy): (i32, i32), color: Color) {
+    c.line((cx - 8, cy - 1), (cx, cy - 8), 2, color);
+    c.line((cx, cy - 8), (cx + 8, cy - 1), 2, color);
+    c.line((cx - 6, cy - 2), (cx - 6, cy + 7), 2, color);
+    c.line((cx + 6, cy - 2), (cx + 6, cy + 7), 2, color);
+    c.line((cx - 6, cy + 7), (cx + 6, cy + 7), 2, color);
+}
+
+fn star(c: &mut Canvas, center: (i32, i32), filled: bool, color: Color) {
+    // Ten points from the top, outside and inside in turn.
+    const POINTS: [(i32, i32); 10] = [
+        (0, -1000),
+        (588, -809),
+        (951, -309),
+        (951, 309),
+        (588, 809),
+        (0, 1000),
+        (-588, 809),
+        (-951, 309),
+        (-951, -309),
+        (-588, -809),
+    ];
+    let p = |i: usize| at(center, POINTS[i % 10], if i.is_multiple_of(2) { 8 } else { 4 });
+    if filled {
+        for r in 0..8 {
+            for i in 0..10 {
+                let scale = |q: (i32, i32)| (center.0 + (q.0 - center.0) * r / 8, center.1 + (q.1 - center.1) * r / 8);
+                c.line(scale(p(i)), scale(p(i + 1)), 2, color);
             }
         }
     }
+    for i in 0..10 {
+        c.line(p(i), p(i + 1), if filled { 2 } else { 1 }, color);
+    }
 }
 
-fn menu_icon(canvas: &mut Canvas, (cx, cy): (i32, i32), color: Color) {
+fn lock(c: &mut Canvas, (x, y): (i32, i32), color: Color) {
+    c.fill_rounded((x, y + 5, x + 10, y + 13), 2, color);
+    c.ring((x + 2, y, x + 8, y + 10), 3, 2, color);
+}
+
+fn burger(c: &mut Canvas, (cx, cy): (i32, i32), color: Color) {
     for dy in [-5, 0, 5] {
-        canvas.fill_rounded((cx - 7, cy + dy - 1, cx + 8, cy + dy + 1), 1, color);
+        c.fill((cx - 7, cy + dy - 1, cx + 7, cy + dy + 1), color);
     }
 }
 
-fn plus(canvas: &mut Canvas, (cx, cy): (i32, i32), color: Color) {
-    canvas.fill((cx - 6, cy - 1, cx + 7, cy + 1), color);
-    canvas.fill((cx - 1, cy - 6, cx + 1, cy + 7), color);
-}
-
-fn cross(canvas: &mut Canvas, (cx, cy): (i32, i32), color: Color) {
-    canvas.line((cx - 4, cy - 4), (cx + 4, cy + 4), 2, color);
-    canvas.line((cx - 4, cy + 4), (cx + 4, cy - 4), 2, color);
-}
-
-/// A field with `text` and, when typed in, its caret (in characters) and
-/// whether all of it is selected.
-fn field(canvas: &mut Canvas, r: Rect, text: &str, caret: Option<(usize, bool)>, f: &Face, placeholder: &str) {
-    canvas.fill_rounded(r, (r.3 - r.1) / 2, FIELD);
-    if caret.is_some() {
-        canvas.ring(r, (r.3 - r.1) / 2, 2, ACCENT);
+fn button(c: &mut Canvas, b: &Browser, rect: Rect, enabled: bool) -> (Color, (i32, i32)) {
+    if enabled && hovered(b, rect) {
+        c.fill_rounded(rect, 8, HOVER);
     }
-    let (_, middle) = center(r);
-    let x0 = r.0 + 12;
-    let room = r.2 - r.0 - 24;
-    let old = canvas.set_clip((r.0 + 8, r.1, r.2 - 8, r.3));
-    if text.is_empty() {
-        canvas.text(x0, f.top_for(middle), placeholder, f, FAINT, false);
-        if caret.is_some() {
-            canvas.fill((x0, middle - 8, x0 + 2, middle + 8), ACCENT);
-        }
+    (if enabled { TEXT } else { FAINT }, ((rect.0 + rect.2) / 2, (rect.1 + rect.3) / 2))
+}
+
+// ---------------------------------------------------------------- drawing
+
+/// `text` cut to `width` with « … », from (x, y) the line's top.
+fn label(c: &mut Canvas, x: i32, y: i32, width: i32, text: &str, face: &Face, color: Color) -> i32 {
+    let (kept, cut) = face.fit(text, width);
+    let mut end = c.text(x, y, &text[..kept], face, color, false);
+    if cut {
+        end = c.text(end, y, "…", face, color, false);
+    }
+    end
+}
+
+/// A line being typed, in `rect`: its text scrolled to keep the caret
+/// seen, the caret, and the selection.
+fn typed(c: &mut Canvas, rect: Rect, line: &crate::edit::Line, face: &Face, placeholder: &str) {
+    let ty = face.top_for((rect.1 + rect.3) / 2);
+    let room = rect.2 - rect.0;
+    let before = &line.text[..crate::edit::byte_at(&line.text, line.caret)];
+    let caret = face.width(before);
+    let shift = (caret - room + 4).max(0);
+    let old = c.set_clip(rect);
+    if line.text.is_empty() {
+        c.text(rect.0, ty, placeholder, face, FAINT, false);
     } else {
-        let at = caret.map_or(0, |(c, _)| f.width(&text[..crate::edit::byte_at(text, c)]));
-        let shift = (at - room + 4).max(0);
-        let x = x0 - shift;
-        if let Some((_, true)) = caret {
-            let w = f.width(text);
-            canvas.fill_rounded((x - 2, middle - 10, x + w + 2, middle + 10), 3, ACCENT.with_alpha(0x70));
+        if line.all {
+            let w = face.width(&line.text).min(room);
+            c.fill_rounded((rect.0 - 2, ty, rect.0 + w + 2, ty + face.height), 3, SELECTION);
         }
-        canvas.text(x, f.top_for(middle), text, f, TEXT, false);
-        if let Some((_, false)) = caret {
-            canvas.fill((x + at, middle - 8, x + at + 2, middle + 8), ACCENT);
-        }
+        c.text(rect.0 - shift, ty, &line.text, face, TEXT, false);
     }
-    canvas.restore_clip(old);
+    if !line.all {
+        let x = rect.0 + caret - shift;
+        c.fill((x, ty + 1, x + 1, ty + face.height - 1), ACCENT);
+    }
+    c.restore_clip(old);
 }
 
-// Le P'tit Âne a mis ses oreilles dans les onglets.
+pub fn draw(b: &Browser, c: &mut Canvas) {
+    let small = ui(13);
+    ring(b, c);
+    tabs(b, c, &small);
+    bar(b, c, &small);
+    scrollbar(b, c);
+    bubble(b, c);
+    if b.finding {
+        find_bar(b, c, &small);
+    }
+    suggestions(b, c, &small);
+    if b.menu {
+        menu(b, c, &small);
+    }
+}
 
-pub fn draw(b: &Browser, canvas: &mut Canvas) {
-    let g = b.geo();
-    let small = face(false, false, 13);
-    let bold = face(false, true, 13);
-    let text = face(false, false, 14);
+/// A ring around the link or control the keyboard is on.
+fn ring(b: &Browser, c: &mut Canvas) {
+    // A field typed in shows its caret instead.
+    if b.focus != Focus::Page {
+        return;
+    }
+    let Some(node) = b.tab().ring else { return };
+    let Some((x, y, w, h)) = b.tab().page.rect_of(node) else { return };
+    let view = b.view();
+    let (x, y) = (view.0 + x, view.1 + y - b.tab().scroll);
+    let old = c.set_clip(view);
+    c.ring((x - 3, y - 2, x + w + 3, y + h + 2), 5, 2, ACCENT);
+    c.restore_clip(old);
+}
 
-    // Tabs.
-    canvas.fill((0, 0, g.w, TABS), STRIP);
+fn tabs(b: &Browser, c: &mut Canvas, f: &Face) {
+    c.fill((0, 0, b.width, TABS), STRIP);
+    let tw = tab_width(b);
     for (i, tab) in b.tabs.iter().enumerate() {
-        let r = g.tab(i);
-        let on = i == b.current;
-        if on {
-            canvas.fill_rounded((r.0, r.1, r.2, r.3 + 8), 8, BAR);
-        } else if hovered(b, crate::chrome::Target::Tab(i)) || hovered(b, Target::CloseTab(i)) {
-            canvas.fill_rounded((r.0, r.1 + 2, r.2, r.3 - 2), 8, HOVER);
+        let x = i as i32 * tw;
+        let rect = (x, 4, x + tw - 2, TABS + 6);
+        let current = i == b.current;
+        if current {
+            c.fill_rounded(rect, 8, SURFACE);
+        } else if hovered(b, (x, 4, x + tw - 2, TABS)) {
+            c.fill_rounded(rect, 8, Color::rgb(0x22, 0x25, 0x2c));
         } else if i + 1 != b.current && i + 1 < b.tabs.len() {
-            canvas.fill((r.2, r.1 + 8, r.2 + 1, r.3 - 6), EDGE);
+            c.fill((x + tw - 2, 12, x + tw - 1, TABS - 8), LINE);
         }
-        let middle = (r.1 + r.3) / 2;
-        let mut x = r.0 + 10;
-        if let Some((done, total)) = tab.progress() {
-            // A spinner-ish dot that fills with the load.
-            canvas.ring((x, middle - 5, x + 10, middle + 5), 5, 2, FAINT);
-            let filled = 10 * (done as i32 + 1) / (total as i32 + 1).max(1);
-            canvas.fill_rounded((x, middle + 5 - filled, x + 10, middle + 5), 3, ACCENT);
-            x += 16;
+        let closes = tw >= 90 || current;
+        let mut tx = x + 12;
+        if tab.loading() {
+            // A small ring while loading.
+            c.ring((tx, 13, tx + 12, 25), 6, 2, ACCENT);
+            tx += 18;
         }
-        let close = g.close(i);
-        let wide = g.tab_width() > 80;
-        let room = if wide { close.0 - x - 4 } else { r.2 - x - 6 };
-        label(canvas, x, middle, &tab.title(), if on { &bold } else { &small }, if on { TEXT } else { DIM }, room);
-        if wide && (on || hovered(b, Target::Tab(i)) || hovered(b, Target::CloseTab(i))) {
-            if hovered(b, Target::CloseTab(i)) {
-                canvas.fill_rounded(close, 6, EDGE);
+        let room = x + tw - tx - if closes { 32 } else { 8 };
+        let color = if current { TEXT } else { MUTED };
+        label(c, tx, f.top_for(TABS / 2 + 2), room, &tab.title(), f, color);
+        if closes {
+            let r = (x + tw - 28, 9, x + tw - 6, TABS - 3);
+            if hovered(b, r) {
+                c.fill_rounded(r, 6, HOVER);
             }
-            cross(canvas, center(close), if on { TEXT } else { DIM });
+            cross(c, ((r.0 + r.2) / 2, (r.1 + r.3) / 2), 4, 2, color);
         }
     }
-    let n = g.new_tab();
-    button_back(canvas, b, Target::NewTab, n);
-    plus(canvas, center(n), DIM);
+    let plus = b.tabs.len() as i32 * tw + 4;
+    let r = (plus, 6, plus + 28, TABS - 2);
+    let (color, (cx, cy)) = button(c, b, r, true);
+    c.fill((cx - 6, cy - 1, cx + 6, cy + 1), color);
+    c.fill((cx - 1, cy - 6, cx + 1, cy + 6), color);
+}
 
-    // Toolbar.
-    canvas.fill((0, TABS, g.w, TOP), BAR);
-    let icons = [Target::Back, Target::Forward, Target::Reload, Target::Home];
-    for (k, t) in icons.into_iter().enumerate() {
-        let r = g.button(k as i32);
-        let usable = match t {
-            Target::Back => b.can(crate::Command::Back),
-            Target::Forward => b.can(crate::Command::Forward),
-            _ => true,
-        };
-        if usable {
-            button_back(canvas, b, t, r);
-        }
-        let color = if usable { TEXT } else { FAINT };
-        let under = if usable && hovered(b, t) { HOVER } else { BAR };
-        match t {
-            Target::Back => arrow(canvas, center(r), -1, color),
-            Target::Forward => arrow(canvas, center(r), 1, color),
-            Target::Reload => reload(canvas, center(r), color, under),
-            _ => house(canvas, center(r), color),
-        }
-    }
-    let a = g.address();
-    let editing = b.focus == Focus::Address;
-    if editing {
-        field(
-            canvas,
-            a,
-            &b.address.text,
-            Some((b.address.caret, b.address.all)),
-            &text,
-            "Rechercher ou saisir une adresse",
-        );
+fn bar(b: &Browser, c: &mut Canvas, f: &Face) {
+    let top = TABS;
+    c.fill((0, top, b.width, top + BAR), SURFACE);
+    c.fill((0, top + BAR - 1, b.width, top + BAR), STRIP);
+    let tab = b.tab();
+    let y = top + 4;
+    let r = |i: i32| (8 + i * 35, y, 40 + i * 35, y + 32);
+    let (color, center) = button(c, b, r(0), tab.can_go_back());
+    arrow(c, center, true, color);
+    let (color, center) = button(c, b, r(1), tab.can_go_forward());
+    arrow(c, center, false, color);
+    let (color, center) = button(c, b, r(2), true);
+    if tab.loading() {
+        cross(c, center, 6, 2, color);
     } else {
-        canvas.fill_rounded(a, (a.3 - a.1) / 2, FIELD);
-        if hovered(b, Target::Address) {
-            canvas.ring(a, (a.3 - a.1) / 2, 1, EDGE);
-        }
-        let url = b.tab().url();
-        let (_, middle) = center(a);
-        let mut x = a.0 + 12;
-        if url.scheme == "https" {
-            lock(canvas, x, middle + 1, DIM);
-            x += 16;
-        }
-        let room = g.star().0 - x - 4;
-        if crate::is_home(url) {
-            label(canvas, x, middle, "Rechercher ou saisir une adresse", &text, FAINT, room);
-        } else {
-            let shown = url.pretty();
-            let host_end = if url.is_hierarchical() { shown.find('/').unwrap_or(shown.len()) } else { shown.len() };
-            let end = label(canvas, x, middle, &shown[..host_end], &text, TEXT, room);
-            if host_end < shown.len() {
-                label(canvas, end, middle, &shown[host_end..], &text, DIM, room - (end - x));
-            }
-        }
-        let s = g.star();
-        if b.is_bookmarked() {
-            star(canvas, center(s), 8, GOLD);
-        } else {
-            star(canvas, center(s), 8, if hovered(b, Target::Star) { TEXT } else { DIM });
-            star(canvas, center(s), 5, FIELD);
-        }
+        reload(c, center, color);
     }
-    let m = g.menu_button();
-    if b.menu {
-        canvas.fill_rounded(m, 8, HOVER);
+    let (color, center) = button(c, b, r(3), true);
+    house(c, center, color);
+
+    // The address.
+    let field = address_field(b);
+    let focused = b.focus == Focus::Address;
+    c.fill_rounded(field, 15, FIELD);
+    if focused {
+        c.ring(field, 15, 2, ACCENT);
+    }
+    let mut tx = field.0 + 14;
+    if !focused && tab.secure && tab.load.is_none() {
+        lock(c, (tx, f.top_for((field.1 + field.3) / 2) + 1), SECURE);
+        tx += 18;
+    }
+    let text_rect = (tx, field.1, field.2 - 38, field.3);
+    if focused {
+        typed(c, text_rect, &b.address, f, "Rechercher ou saisir une adresse");
     } else {
-        button_back(canvas, b, Target::Menu, m);
+        let text = b.address_text();
+        let ty = f.top_for((field.1 + field.3) / 2);
+        if text.is_empty() {
+            c.text(tx, ty, "Rechercher ou saisir une adresse", f, FAINT, false);
+        } else {
+            // The host bright, the rest dim.
+            let shown = text.strip_prefix("https://").unwrap_or(&text);
+            let shown = if shown.find('/') == Some(shown.len() - 1) { &shown[..shown.len() - 1] } else { shown };
+            let host_end = shown.find('/').unwrap_or(shown.len());
+            let old = c.set_clip(text_rect);
+            let end = c.text(tx, ty, &shown[..host_end], f, TEXT, false);
+            label(c, end, ty, text_rect.2 - end, &shown[host_end..], f, MUTED);
+            c.restore_clip(old);
+        }
     }
-    menu_icon(canvas, center(m), TEXT);
-
-    // The load's progress, along the toolbar's bottom.
-    if let Some((done, total)) = b.tab().progress() {
-        let w = g.w * (done as i32 * 2 + 1) / (total as i32 * 2 + 2).max(1);
-        canvas.fill((0, TOP - 2, w, TOP), ACCENT);
+    let star_rect = (field.2 - 34, field.1 + 1, field.2 - 4, field.3 - 1);
+    if hovered(b, star_rect) {
+        c.fill_rounded(star_rect, 12, HOVER);
     }
+    let marked = b.bookmarked();
+    star(
+        c,
+        ((star_rect.0 + star_rect.2) / 2, (star_rect.1 + star_rect.3) / 2),
+        marked,
+        if marked { STAR } else { MUTED },
+    );
 
-    // Scrollbar.
-    let sb = g.scrollbar();
-    canvas.fill(sb, Color::rgb(0x1d, 0x20, 0x28));
-    if let Some((top, size)) = b.thumb() {
-        let color = if hovered(b, Target::Scrollbar) { DIM } else { Color::rgb(0x4a, 0x50, 0x60) };
-        canvas.fill_rounded((sb.0 + 2, sb.1 + top + 2, sb.2 - 2, sb.1 + top + size - 2), 3, color);
+    let (color, center) = button(c, b, (b.width - 44, y, b.width - 8, y + 32), true);
+    burger(c, center, if b.menu { ACCENT } else { color });
+
+    if let Some(p) = b.progress() {
+        let w = b.width * p / 1000;
+        c.fill((0, top + BAR - 2, w, top + BAR), ACCENT);
     }
+}
 
-    // Status: the link under the pointer, or what loads.
-    let status = match &b.hover {
-        Hover::Link(url) => Some(url.clone()),
-        _ => b.tab().progress().map(|_| format!("Chargement de {}…", b.tab().url().pretty())),
+fn scrollbar(b: &Browser, c: &mut Canvas) {
+    let Some((top, len)) = thumb(b) else { return };
+    let (_, _, vx1, _) = b.view();
+    let x = vx1 - SCROLLBAR;
+    let active = b.dragging.is_some() || hovered(b, (x - 2, top, vx1, top + len));
+    let color = if active { Color(0xc0_6a_70_80) } else { Color(0x90_80_86_94) };
+    c.fill_rounded((x + 2, top + 2, vx1 - 2, top + len - 2), 3, color);
+}
+
+fn bubble(b: &Browser, c: &mut Canvas) {
+    let f = ui(12);
+    let text = match &b.tab().load {
+        Some(l) => match l.url.scheme.as_str() {
+            "file" => String::from("Ouverture du fichier…"),
+            _ => format!("Chargement de {}…", l.url.authority()),
+        },
+        None => match b.hovered_link() {
+            Some(u) => u.to_string(),
+            None => return,
+        },
     };
-    if let Some(s) = status {
-        let c = g.content();
-        let w = small.width(&s).min(c.2 * 2 / 3) + 20;
-        let r = (c.0 + 4, c.3 - 26, c.0 + 4 + w, c.3 - 4);
-        canvas.fill_rounded(r, 6, BAR);
-        canvas.ring(r, 6, 1, EDGE);
-        label(canvas, r.0 + 10, center(r).1, &s, &small, TEXT, w - 20);
-    }
+    let (_, _, vx1, vy1) = b.view();
+    let room = (vx1 / 2).max(200);
+    let w = f.width(&text).min(room) + 16;
+    let rect = (0, vy1 - f.height - 8, w, vy1);
+    c.fill_rounded((rect.0 - 8, rect.1, rect.2, rect.3 + 8), 8, SURFACE);
+    c.fill((rect.2 - 1, rect.1 + 8, rect.2, rect.3), LINE);
+    label(c, 8, rect.1 + 4, room, &text, &f, MUTED);
+}
 
-    // Find bar.
-    if b.find_open {
-        let y0 = g.h - FIND;
-        canvas.fill((0, y0, g.w, g.h), BAR);
-        canvas.fill((0, y0, g.w, y0 + 1), EDGE);
-        label(canvas, 12, y0 + FIND / 2, "Rechercher", &small, DIM, 90);
-        let caret = (b.focus == Focus::Find).then_some((b.find.caret, b.find.all));
-        let f = g.find_field();
-        field(canvas, f, &b.find.text, caret, &small, "dans la page");
-        if !b.find.is_empty() {
-            let (at, n) = b.found();
-            let count = if n == 0 { String::from("Aucun résultat") } else { format!("{at} sur {n}") };
-            let color = if n == 0 { Color::rgb(0xff, 0x9e, 0x8f) } else { DIM };
-            label(canvas, f.2 + 10, y0 + FIND / 2, &count, &small, color, g.find_prev().0 - f.2 - 14);
+fn find_bar(b: &Browser, c: &mut Canvas, f: &Face) {
+    let y = b.height - FIND;
+    c.fill((0, y, b.width, b.height), SURFACE);
+    c.fill((0, y, b.width, y + 1), STRIP);
+    let field = (12, y + 6, 332, y + FIND - 6);
+    let focused = b.focus == Focus::Find;
+    c.fill_rounded(field, 14, FIELD);
+    if focused {
+        c.ring(field, 14, 2, ACCENT);
+    }
+    let inner = (field.0 + 12, field.1, field.2 - 10, field.3);
+    if focused {
+        typed(c, inner, &b.find, f, "Rechercher dans la page");
+    } else if b.find.text.is_empty() {
+        c.text(inner.0, f.top_for((field.1 + field.3) / 2), "Rechercher dans la page", f, FAINT, false);
+    } else {
+        label(c, inner.0, f.top_for((field.1 + field.3) / 2), inner.2 - inner.0, &b.find.text, f, TEXT);
+    }
+    let count = b.tab().page.found_at(&b.find.text).len();
+    let note = match (b.find.text.is_empty(), count) {
+        (true, _) => String::new(),
+        (false, 0) => String::from("Introuvable"),
+        (false, n) => format!("{} sur {n}", (b.found % n) + 1),
+    };
+    c.text(342, f.top_for(y + FIND / 2), &note, f, MUTED, false);
+    for (rect, up) in [((420, y + 4, 452, y + FIND - 4), true), ((454, y + 4, 486, y + FIND - 4), false)] {
+        let (color, (cx, cy)) = button(c, b, rect, count > 0);
+        let d = if up { -1 } else { 1 };
+        c.line((cx - 6, cy - 3 * d), (cx, cy + 3 * d), 2, color);
+        c.line((cx, cy + 3 * d), (cx + 6, cy - 3 * d), 2, color);
+    }
+    let (color, center) = button(c, b, (b.width - 40, y + 4, b.width - 8, y + FIND - 4), true);
+    cross(c, center, 5, 2, color);
+}
+
+fn panel(c: &mut Canvas, rect: Rect) {
+    // A shadow, then the panel.
+    c.fill_rounded((rect.0 - 1, rect.1 + 1, rect.2 + 1, rect.3 + 4), 10, Color(0x60_00_00_00));
+    c.fill_rounded(rect, 10, SURFACE);
+    c.ring(rect, 10, 1, LINE);
+}
+
+fn suggestions(b: &Browser, c: &mut Canvas, f: &Face) {
+    let list = b.suggestions();
+    if list.is_empty() {
+        return;
+    }
+    let field = address_field(b);
+    let top = TABS + BAR;
+    panel(c, (field.0, top, field.2, top + list.len() as i32 * ROW + 6));
+    let small = ui(12);
+    for (i, s) in list.iter().enumerate() {
+        let y = top + 3 + i as i32 * ROW;
+        let row = (field.0 + 4, y, field.2 - 4, y + ROW);
+        if b.picked == Some(i) || hovered(b, row) {
+            c.fill_rounded(row, 6, if b.picked == Some(i) { SELECTION } else { HOVER });
         }
-        for (t, r) in
-            [(Target::FindPrev, g.find_prev()), (Target::FindNext, g.find_next()), (Target::FindClose, g.find_close())]
-        {
-            button_back(canvas, b, t, r);
-            let (cx, cy) = center(r);
-            match t {
-                Target::FindPrev => {
-                    canvas.line((cx - 5, cy + 3), (cx, cy - 3), 2, TEXT);
-                    canvas.line((cx, cy - 3), (cx + 5, cy + 3), 2, TEXT);
-                }
-                Target::FindNext => {
-                    canvas.line((cx - 5, cy - 3), (cx, cy + 3), 2, TEXT);
-                    canvas.line((cx, cy + 3), (cx + 5, cy - 3), 2, TEXT);
-                }
-                _ => cross(canvas, (cx, cy), TEXT),
-            }
+        let ty = f.top_for(y + ROW / 2);
+        let end = label(c, field.0 + 14, ty, (field.2 - field.0) / 2, &s.label(), f, TEXT);
+        let rest = field.2 - 14 - end - 16;
+        if rest > 40 {
+            label(c, end + 16, small.top_for(y + ROW / 2), rest, &s.url.pretty(), &small, MUTED);
         }
     }
+}
 
-    // Suggestions under the address bar.
-    if editing && !b.suggestions.is_empty() {
-        let first = g.suggestion(0);
-        let last = g.suggestion(b.suggestions.len() - 1);
-        let r = (first.0, first.1 - 2, first.2, last.3 + 4);
-        canvas.fill_rounded(r, 10, POPUP);
-        canvas.ring(r, 10, 1, EDGE);
-        for (i, m) in b.suggestions.iter().enumerate() {
-            let s = g.suggestion(i);
-            if b.pick == Some(i) || hovered(b, Target::Suggestion(i)) {
-                canvas.fill_rounded((s.0 + 4, s.1 + 1, s.2 - 4, s.3 - 1), 6, HOVER);
-            }
-            let title = if m.title.is_empty() { m.url.pretty() } else { m.title.clone() };
-            let w = s.2 - s.0 - 28;
-            let middle = center(s).1;
-            let end = label(canvas, s.0 + 14, middle, &title, &small, TEXT, w * 3 / 5);
-            label(canvas, end + 10, middle, &m.url.pretty(), &small, ACCENT, s.2 - end - 24);
+fn menu(b: &Browser, c: &mut Canvas, f: &Face) {
+    let x = b.width - MENU_WIDTH - 8;
+    let top = TABS + BAR;
+    panel(c, (x, top, x + MENU_WIDTH, top + MENU.len() as i32 * ROW + 8));
+    let small = ui(12);
+    for (i, (name, keys, _)) in MENU.iter().enumerate() {
+        let y = top + 4 + i as i32 * ROW;
+        let row = (x + 4, y, x + MENU_WIDTH - 4, y + ROW);
+        if hovered(b, row) {
+            c.fill_rounded(row, 6, HOVER);
         }
-    }
-
-    // The menu.
-    if b.menu {
-        let r = g.menu();
-        canvas.fill_rounded(r, 10, POPUP);
-        canvas.ring(r, 10, 1, EDGE);
-        for (i, (name, command)) in MENU.iter().enumerate() {
-            let it = g.menu_item(i);
-            if hovered(b, Target::MenuItem(i)) {
-                canvas.fill_rounded(it, 6, HOVER);
-            }
-            let name =
-                if *command == crate::Command::Bookmark && b.is_bookmarked() { "Retirer des favoris" } else { name };
-            label(canvas, it.0 + 12, center(it).1, name, &small, TEXT, it.2 - it.0 - 24);
+        c.text(x + 16, f.top_for(y + ROW / 2), name, f, TEXT, false);
+        if !keys.is_empty() {
+            let w = small.width(keys);
+            c.text(x + MENU_WIDTH - 16 - w, small.top_for(y + ROW / 2), keys, &small, FAINT, false);
+        }
+        // Le P'tit Âne draws the line here.
+        if i == 3 {
+            c.fill((x + 12, y + ROW + 1, x + MENU_WIDTH - 12, y + ROW + 2), LINE);
         }
     }
 }

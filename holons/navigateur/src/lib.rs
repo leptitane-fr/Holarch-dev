@@ -21,7 +21,7 @@ extern crate alloc;
 mod heap;
 
 use alloc::string::String;
-use hln_browser::{Browser, Event, Key};
+use hln_browser::{Browser, Event, Key, Mods};
 use hln_web::paint::Canvas;
 
 #[link(wasm_import_module = "hln")]
@@ -54,8 +54,8 @@ fn event(word: i64) -> Option<Event> {
     if word & MOUSE != 0 {
         let x = (word & 0xffff) as i32;
         let y = (word >> 16 & 0xffff) as i32;
-        let buttons = (word >> 32 & 7) as u32;
-        return Some(Event::Pointer { x, y, buttons });
+        let left = word >> 32 & 1 != 0;
+        return Some(Event::Pointer { x, y, left });
     }
     if word & SPECIAL != 0 {
         let key = match word & 0xfff {
@@ -72,16 +72,17 @@ fn event(word: i64) -> Option<Event> {
             11 => Key::Delete,
             _ => return None,
         };
-        return Some(Event::Key(key));
+        return Some(Event::Key(key, Mods::NONE));
     }
-    char::from_u32((word & 0xffff_ffff) as u32).filter(|c| !c.is_control()).map(Event::Char)
+    let c = char::from_u32((word & 0xffff_ffff) as u32).filter(|c| !c.is_control())?;
+    Some(Event::Key(Key::Char(c), Mods::NONE))
 }
 
 #[cfg(feature = "network")]
 mod network {
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
-    use hln_browser::{Net, NetError, Response};
+    use hln_browser::net::{Net, NetError, Response};
     use hln_web::url::Url;
 
     #[link(wasm_import_module = "hln")]
@@ -142,8 +143,8 @@ fn net() -> network::System {
 }
 
 #[cfg(not(feature = "network"))]
-fn net() -> hln_browser::Offline {
-    hln_browser::Offline
+fn net() -> hln_browser::net::Offline {
+    hln_browser::net::Offline
 }
 
 #[unsafe(no_mangle)]
@@ -151,10 +152,11 @@ pub extern "C" fn hln_main() -> i32 {
     let mut browser = Browser::new(WIDTH, HEIGHT);
     let mut canvas = Canvas::new(WIDTH, HEIGHT);
     let mut net = net();
+    let mut dirty = true;
     say("navigateur: prêt");
     loop {
         // Everything that came, then draw once.
-        let mut wait = !browser.dirty() && !browser.needs_load();
+        let mut wait = !dirty && !browser.busy();
         loop {
             // SAFETY: a call into the host, no memory shared.
             let word = unsafe { input(i32::from(wait)) };
@@ -166,19 +168,19 @@ pub extern "C" fn hln_main() -> i32 {
             }
             wait = false;
             if word == REDRAW {
-                browser.handle(Event::Resize(WIDTH, HEIGHT));
-                browser.redraw();
+                dirty = true;
             } else if let Some(e) = event(word) {
-                browser.handle(e);
+                dirty |= browser.handle(e);
             }
         }
-        if browser.dirty() {
+        if dirty {
+            dirty = false;
             browser.draw(&mut canvas);
             // SAFETY: the host reads `WIDTH` × `HEIGHT` pixels at
             // `canvas.pixels`, in this holon's memory.
             unsafe { present(canvas.pixels.as_ptr(), WIDTH as usize, HEIGHT as usize) };
-        } else if browser.needs_load() {
-            browser.load(&mut net);
+        } else if browser.busy() {
+            dirty = browser.step(&mut net);
         }
     }
 }

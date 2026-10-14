@@ -19,12 +19,12 @@ pub fn root() -> PathBuf {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
+        Some("bench") => bench::run(&args[1..]),
         Some("faces") => faces::generate(&args[1..]),
         Some("page") => page::run(&args[1..]),
-        Some("bench") => bench::run(&args[1..]),
         Some("holon") => holon::run(&args[1..]),
-        Some("test") => holon::run(&[]).and_then(|()| bench::run(&[])),
-        _ => Err("usage: cargo xtask <faces … | page … | bench … | holon | test>".into()),
+        Some("test") => holon::run(&[]).and_then(|()| bench::run(&["--offline".into()])),
+        _ => Err("usage: cargo xtask <bench … | faces … | holon | page … | test>".into()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

@@ -1,144 +1,187 @@
-//! `cargo xtask bench [address…] [--size WxH] [--out dir]`: drives the
-//! whole browser (tabs, toolbar, its own pages) as the holon would, with
-//! `curl` for the network and the disk for `file:` addresses, and saves a
-//! PNG after each step to look at.
+//! `cargo xtask bench [address] [out.png] [--size WxH] [--offline] [steps…]`:
+//! runs the whole browser (tabs, bar, pages) as the holon would, on this
+//! machine's network (`curl`) or none (`--offline`), plays the steps, and
+//! writes what the window shows to a PNG.
+//!
+//! Steps, played in order once the address has loaded:
+//! `--type TEXT` types in what has the keys, `--key NAME` presses a key
+//! (`enter`, `tab`, `escape`, `down`, `up`, `pagedown`, `backspace`, or
+//! `ctrl+l`, `ctrl+t`, `ctrl+f`, `ctrl+d`, `alt+left`…), `--click X,Y`
+//! clicks there, `--hover X,Y` moves the pointer, `--wheel N` turns the
+//! wheel, `--open ADDRESS` opens an address. The browser loads whatever
+//! a step started before the next one.
 
-use crate::{Result, page::fetch, png, root};
-use hln_browser::{Browser, Command, Event, Key, LEFT, Net, NetError, Response, TOP};
+use crate::page::fetch_with;
+use crate::{Result, png, root};
+use hln_browser::net::{Net, NetError, Response};
+use hln_browser::{Browser, Event, Key, Mods};
 use hln_web::paint::Canvas;
 use hln_web::url::{self, Url};
 use std::fs;
-use std::path::PathBuf;
+use std::time::Instant;
 
-/// The network seen from the development machine.
-struct Host;
+/// The network of this machine: `curl`, and files.
+struct Curl;
 
-impl Net for Host {
+impl Net for Curl {
     fn fetch(&mut self, url: &Url, post: Option<&str>) -> std::result::Result<Response, NetError> {
         match url.scheme.as_str() {
             "file" => {
                 let path = url::decode(&url.path);
-                let body = fs::read(&path).map_err(|e| NetError::Failed(format!("{path} : {e}")))?;
-                let ct = if path.ends_with(".css") {
-                    "text/css"
-                } else if path.ends_with(".txt") {
-                    "text/plain"
-                } else {
+                let body = fs::read(&path)
+                    .map_err(|e| NetError::Failed(format!("Le fichier {path} ne s'ouvre pas ({e}).")))?;
+                let html = path.ends_with(".html") || path.ends_with(".htm");
+                let content_type = Some(String::from(if html {
                     "text/html"
-                };
-                Ok(Response { url: url.clone(), status: 200, content_type: Some(ct.into()), body })
+                } else if path.ends_with(".css") {
+                    "text/css"
+                } else {
+                    ""
+                }));
+                Ok(Response { url: url.clone(), status: 200, content_type, body })
             }
             "http" | "https" => {
-                if post.is_some() {
-                    return Err(NetError::Failed("le banc n'envoie pas de formulaire POST".into()));
-                }
-                let (final_url, ct, body) = fetch(&url.to_string()).map_err(NetError::Failed)?;
-                let final_url = Url::parse(&final_url).unwrap_or_else(|| url.clone());
-                Ok(Response { url: final_url, status: 200, content_type: ct, body })
+                let (final_url, content_type, status, body) = fetch_with(&url.to_string(), post)
+                    .map_err(|e| NetError::Failed(format!("Le serveur n'a pas pu être joint ({e}).")))?;
+                let url = Url::parse(&final_url).unwrap_or_else(|| url.clone());
+                Ok(Response { url, status, content_type, body })
             }
             _ => Err(NetError::Unsupported),
         }
     }
 }
 
-struct Bench {
-    browser: Browser,
-    canvas: Canvas,
-    out: PathBuf,
-    shot: usize,
-    size: (i32, i32),
-}
-
-impl Bench {
-    fn settle(&mut self) {
-        let mut steps = 0;
-        while self.browser.needs_load() && steps < 200 {
-            self.browser.load(&mut Host);
-            steps += 1;
+fn settle(browser: &mut Browser, net: &mut dyn Net) {
+    for _ in 0..200 {
+        if !browser.step(net) {
+            return;
         }
     }
+}
 
-    fn shoot(&mut self, name: &str) -> Result {
-        self.browser.draw(&mut self.canvas);
-        self.shot += 1;
-        let path = self.out.join(format!("{:02}-{name}.png", self.shot));
-        fs::write(&path, png::encode(self.size.0 as u32, self.size.1 as u32, &self.canvas.pixels))
-            .map_err(|e| format!("{}: {e}", path.display()))?;
-        println!("xtask: « {} » -> {}", self.browser.title(), path.display());
-        Ok(())
-    }
+fn point(text: &str) -> Result<(i32, i32)> {
+    let (x, y) = text.split_once(',').ok_or("X,Y")?;
+    Ok((x.trim().parse().map_err(|_| "X,Y")?, y.trim().parse().map_err(|_| "X,Y")?))
+}
 
-    fn click(&mut self, x: i32, y: i32) {
-        self.browser.handle(Event::Pointer { x, y, buttons: LEFT });
-        self.browser.handle(Event::Pointer { x, y, buttons: 0 });
+fn key(name: &str) -> Result<(Key, Mods)> {
+    let mut mods = Mods::NONE;
+    let mut rest = name;
+    loop {
+        if let Some(r) = rest.strip_prefix("ctrl+") {
+            mods.ctrl = true;
+            rest = r;
+        } else if let Some(r) = rest.strip_prefix("alt+") {
+            mods.alt = true;
+            rest = r;
+        } else if let Some(r) = rest.strip_prefix("shift+") {
+            mods.shift = true;
+            rest = r;
+        } else {
+            break;
+        }
     }
+    let key = match rest {
+        "enter" => Key::Enter,
+        "tab" => Key::Tab,
+        "escape" => Key::Escape,
+        "backspace" => Key::Backspace,
+        "delete" => Key::Delete,
+        "up" => Key::Up,
+        "down" => Key::Down,
+        "left" => Key::Left,
+        "right" => Key::Right,
+        "home" => Key::Home,
+        "end" => Key::End,
+        "pageup" => Key::PageUp,
+        "pagedown" => Key::PageDown,
+        "space" => Key::Char(' '),
+        k if k.chars().count() == 1 => Key::Char(k.chars().next().unwrap_or(' ')),
+        k => return Err(format!("unknown key {k}")),
+    };
+    Ok((key, mods))
 }
 
 pub fn run(args: &[String]) -> Result {
-    let mut size = (1024, 700);
-    let mut out = root().join("build/bench");
-    let mut addresses = Vec::new();
+    let mut size = (1280, 800);
+    let mut offline = false;
+    let mut rest = Vec::new();
+    let mut steps: Vec<(String, String)> = Vec::new();
     let mut i = 0;
     while i < args.len() {
-        match args[i].as_str() {
+        let a = args[i].as_str();
+        match a {
             "--size" => {
                 let s = args.get(i + 1).ok_or("--size WxH")?;
                 let (w, h) = s.split_once('x').ok_or("--size WxH")?;
                 size = (w.parse().map_err(|_| "--size")?, h.parse().map_err(|_| "--size")?);
                 i += 1;
             }
-            "--out" => {
-                out = PathBuf::from(args.get(i + 1).ok_or("--out dir")?);
+            "--offline" => offline = true,
+            "--type" | "--key" | "--click" | "--hover" | "--wheel" | "--open" => {
+                let v = args.get(i + 1).ok_or(format!("{a} needs a value"))?;
+                steps.push((a.to_string(), v.clone()));
                 i += 1;
             }
-            a if std::path::Path::new(a).exists() => {
-                let full = fs::canonicalize(a).map_err(|e| e.to_string())?;
-                addresses.push(format!("file://{}", full.display()));
-            }
-            a => addresses.push(a.to_string()),
+            _ if a.starts_with("--") => return Err(format!("unknown option {a}")),
+            _ => rest.push(a.to_string()),
         }
         i += 1;
     }
-    fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
-    let mut b =
-        Bench { browser: Browser::new(size.0, size.1), canvas: Canvas::new(size.0, size.1), out, shot: 0, size };
-    b.browser.bookmark("Page d'essai", Url::parse("about:essai").ok_or("about")?);
-    b.browser.bookmark("Aide", Url::parse("about:aide").ok_or("about")?);
-    b.settle();
-    b.shoot("accueil")?;
-    for c in "pyp".chars() {
-        b.browser.handle(Event::Char(c));
+    let out = rest.get(1).cloned().unwrap_or_else(|| root().join("build/bench.png").display().to_string());
+    let mut net: Box<dyn Net> = if offline { Box::new(hln_browser::net::Offline) } else { Box::new(Curl) };
+    let t0 = Instant::now();
+    let mut browser = Browser::new(size.0, size.1);
+    if let Some(address) = rest.first() {
+        let address = if fs::metadata(address).is_ok() {
+            format!("file://{}", fs::canonicalize(address).map_err(|e| e.to_string())?.display())
+        } else {
+            address.clone()
+        };
+        browser.open(&address);
+        settle(&mut browser, net.as_mut());
     }
-    b.shoot("saisie")?;
-    b.browser.handle(Event::Key(Key::Escape));
-    b.browser.run(Command::Help);
-    b.settle();
-    b.shoot("aide")?;
-    b.browser.open("about:essai");
-    b.settle();
-    b.shoot("essai")?;
-    b.browser.handle(Event::Char('/'));
-    for c in "tableau".chars() {
-        b.browser.handle(Event::Char(c));
+    for (step, value) in &steps {
+        match step.as_str() {
+            "--type" => {
+                for c in value.chars() {
+                    browser.handle(Event::Key(Key::Char(c), Mods::NONE));
+                }
+            }
+            "--key" => {
+                let (k, m) = key(value)?;
+                browser.handle(Event::Key(k, m));
+            }
+            "--click" => {
+                let (x, y) = point(value)?;
+                browser.handle(Event::Pointer { x, y, left: true });
+                browser.handle(Event::Pointer { x, y, left: false });
+            }
+            "--hover" => {
+                let (x, y) = point(value)?;
+                browser.handle(Event::Pointer { x, y, left: false });
+            }
+            "--wheel" => {
+                browser.handle(Event::Wheel(value.parse().map_err(|_| "--wheel N")?));
+            }
+            _ => browser.open(value),
+        }
+        settle(&mut browser, net.as_mut());
     }
-    b.shoot("recherche")?;
-    b.browser.handle(Event::Key(Key::Escape));
-    for address in &addresses {
-        b.browser.run(Command::NewTab);
-        b.browser.open(address);
-        b.settle();
-        b.shoot("page")?;
-        b.browser.handle(Event::Wheel(6));
-        b.browser.handle(Event::Pointer { x: 200, y: TOP + 200, buttons: 0 });
-        b.shoot("defile")?;
+    let t1 = Instant::now();
+    let mut canvas = Canvas::new(size.0, size.1);
+    browser.draw(&mut canvas);
+    let t2 = Instant::now();
+    if let Some(parent) = std::path::Path::new(&out).parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let (x, y) = (size.0 - 20, TOP - 20);
-    b.click(x, y);
-    b.browser.handle(Event::Pointer { x: size.0 - 120, y: TOP + 50, buttons: 0 });
-    b.shoot("menu")?;
-    b.browser.handle(Event::Key(Key::Escape));
-    b.browser.open("https://exemple.invalid/");
-    b.settle();
-    b.shoot("erreur")?;
+    fs::write(&out, png::encode(size.0 as u32, size.1 as u32, &canvas.pixels)).map_err(|e| format!("{out}: {e}"))?;
+    println!(
+        "xtask: « {} », {} tab(s); load and steps {:?}, draw {:?} -> {out}",
+        browser.title(),
+        browser.tabs.len(),
+        t1 - t0,
+        t2 - t1
+    );
     Ok(())
 }

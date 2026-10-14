@@ -1590,11 +1590,11 @@ fn lines(
         let mut boxes_open: Vec<(usize, i32)> = open.iter().map(|&o| (o, x0)).collect();
         let mut texts: Vec<Frag> = Vec::new();
         let mut spaces_seen = 0;
-        // A run of words drawn as one: its x, text, style, node,
+        // A run of text being gathered: where, what, its style, node,
         // decoration and width.
-        type Run<'s> = (i32, String, &'s Rc<Style>, Option<NodeId>, (u8, Color), i32);
-        let mut run: Option<Run> = None;
-        let flush_run = |run: &mut Option<Run>, texts: &mut Vec<Frag>| {
+        type Run<'s> = Option<(i32, String, &'s Rc<Style>, Option<NodeId>, (u8, Color), i32)>;
+        let mut run: Run = None;
+        let flush_run = |run: &mut Run, texts: &mut Vec<Frag>| {
             if let Some((rx, text, style, node, deco, rw)) = run.take() {
                 let text = text.trim_end_matches(' ');
                 let text = String::from(text);

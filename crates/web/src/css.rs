@@ -561,9 +561,9 @@ fn rules(toks: &[Tok], media: &Media, sheet: &mut Sheet, top: bool) {
                 match name.as_str() {
                     "media" if media_matches(prelude, media) => rules(body, media, sheet, false),
                     "supports" if supports(prelude) => rules(body, media, sheet, false),
-                    // Layers apply as written; @document, @scope and
-                    // @starting-style are skipped.
-                    "layer" => rules(body, media, sheet, false),
+                    "layer" | "document" | "-moz-document" | "scope" | "starting-style" if name == "layer" => {
+                        rules(body, media, sheet, false)
+                    }
                     _ => {}
                 }
                 i = end + 1;

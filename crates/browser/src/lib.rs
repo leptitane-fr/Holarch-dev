@@ -1,50 +1,51 @@
-//! The browser around the engine: tabs with their history, the address
-//! bar and its suggestions, bookmarks, the find bar, the menu, and the
-//! browser's own pages. It is driven by [`Event`]s, loads through a
-//! [`Net`] one step at a time (so a frame can show the progress between
-//! steps), and draws itself on a [`Canvas`]. The holon and the bench share
-//! all of it.
+//! The browser around the engine: tabs, each with its own history, the
+//! address bar, bookmarks, the browser's own pages, finding text in a
+//! page, and how keys and the pointer drive all of it.
+//!
+//! It draws itself on a [`Canvas`] ([`Browser::draw`]) and reaches the
+//! network only through [`Net`], one request at a time
+//! ([`Browser::step`]), so the holon and the bench share every line.
+//! A page is loaded in stages: its document, then its style sheets and
+//! what they `@import`; the page shown stays until the new one is whole.
 
 #![no_std]
 
 extern crate alloc;
+#[cfg(test)]
+extern crate std;
 
 mod chrome;
 pub mod edit;
 pub mod net;
 pub mod pages;
 
-use alloc::boxed::Box;
-use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use edit::{Line, byte_at};
+use edit::Line;
 use hln_web::dom::NodeId;
 use hln_web::page::Page;
-use hln_web::paint::{self, Canvas, Overlay, Rect};
+use hln_web::paint::{Canvas, Overlay};
 use hln_web::url::{self, Url};
-pub use net::{Net, NetError, Offline, Response};
-use pages::{Book, Mark};
+use net::{Net, NetError};
+use pages::Saved;
 
-/// The tab strip's height, in pixels.
-pub const TABS: i32 = 34;
-/// The toolbar's height.
-pub const BAR: i32 = 40;
-/// Where the page starts.
-pub const TOP: i32 = TABS + BAR;
-pub const SCROLLBAR: i32 = 10;
-/// The find bar's height, at the bottom when open.
-pub const FIND: i32 = 36;
-/// One step of the arrows and the wheel.
-const LINE: i32 = 48;
-pub const HOME: &str = "about:accueil";
-/// Where searches typed in the address bar go.
+pub use chrome::{BAR, FIND, TABS};
+
+/// Where words typed in the address bar are searched.
 pub const SEARCH: &str = "https://html.duckduckgo.com/html/?q=";
-const MAX_VISITED: usize = 500;
-const MAX_REFRESHES: u8 = 5;
+/// The page a new tab opens on.
+pub const HOME: &str = "about:accueil";
+/// How many pages the history of the session keeps.
+const HISTORY: usize = 200;
+/// How many times a page may send to another one at once (`meta refresh`).
+const REDIRECTS: u8 = 5;
+/// How far an arrow key or a notch of the wheel moves the page.
+const STEP: i32 = 48;
 
+/// A key, as the browser understands it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Key {
+    Char(char),
     Enter,
     Backspace,
     Tab,
@@ -60,93 +61,72 @@ pub enum Key {
     PageDown,
 }
 
-/// The pointer's buttons.
-pub const LEFT: u32 = 1;
-pub const RIGHT: u32 = 2;
+/// The keys held with another.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Mods {
+    pub ctrl: bool,
+    pub shift: bool,
+    pub alt: bool,
+}
 
+impl Mods {
+    pub const NONE: Mods = Mods { ctrl: false, shift: false, alt: false };
+    pub const CTRL: Mods = Mods { ctrl: true, shift: false, alt: false };
+    pub const ALT: Mods = Mods { ctrl: false, shift: false, alt: true };
+}
+
+/// What reaches the browser from the person.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
-    Char(char),
-    Key(Key),
-    /// A key with Ctrl held: its letter in lower case, or `'\t'`.
-    Ctrl(char),
-    /// Where the pointer is, in the window, and which buttons are down.
+    Key(Key, Mods),
+    /// The pointer, in the browser's pixels, and whether the left button
+    /// is held.
     Pointer {
         x: i32,
         y: i32,
-        buttons: u32,
+        left: bool,
     },
-    /// Wheel notches, positive toward the page's bottom.
+    /// The wheel, in notches: positive goes down the page.
     Wheel(i32),
+    /// The window's new size.
     Resize(i32, i32),
 }
 
 /// Where the keys go.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Focus {
+#[derive(Clone, PartialEq, Eq)]
+enum Focus {
     Page,
     Address,
-    /// A text field of the page.
+    /// A text field of the page, and what is being typed in it.
     Field(NodeId),
     Find,
 }
 
-/// What the browser can be asked to do, from a key, a button or the menu.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Command {
-    NewTab,
-    CloseTab,
-    NextTab,
-    Back,
-    Forward,
-    Reload,
-    Home,
-    Bookmark,
-    Bookmarks,
-    History,
-    Find,
-    Source,
-    Help,
-    About,
-}
-
-/// The menu (≡), in order.
-pub const MENU: &[(&str, Command)] = &[
-    ("Nouvel onglet", Command::NewTab),
-    ("Fermer l'onglet", Command::CloseTab),
-    ("Ajouter aux favoris", Command::Bookmark),
-    ("Favoris", Command::Bookmarks),
-    ("Historique", Command::History),
-    ("Rechercher dans la page", Command::Find),
-    ("Code source de la page", Command::Source),
-    ("Recharger", Command::Reload),
-    ("Aide", Command::Help),
-    ("À propos", Command::About),
-];
-
-/// One page of a tab's history.
+/// A page in a tab's history.
 struct Entry {
     url: Url,
     post: Option<String>,
+    title: String,
+    /// Where the page was scrolled when left.
     scroll: i32,
 }
 
-/// What becomes of the history when a load ends.
+/// Why a page is being loaded: how the tab's history changes once it is.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum How {
-    /// A new page after the current one.
-    Push,
-    /// In place of the current one (a refresh, a redirect by the page).
+enum Kind {
+    /// A new page: it ends the history after the current one.
+    New,
+    /// The current page again, or another in its place (a redirection).
     Replace,
-    /// The current entry again (back, forward, reload), at this scroll.
-    Revisit(i32),
+    /// The page at this place in the history.
+    Back(usize),
 }
 
 enum Stage {
     Document,
-    /// The document came; its style sheets are coming.
+    /// The page has come; its style sheets are loading.
     Sheets {
-        page: Box<Page>,
+        page: alloc::boxed::Box<Page>,
         queue: Vec<(NodeId, Url)>,
         seen: Vec<Url>,
     },
@@ -155,181 +135,115 @@ enum Stage {
 struct Load {
     url: Url,
     post: Option<String>,
-    how: How,
+    kind: Kind,
     stage: Stage,
-    /// Steps done, and known to do.
+    redirects: u8,
+    /// Requests made and known, for the progress bar.
     done: usize,
     total: usize,
 }
 
-pub(crate) struct Tab {
-    page: Page,
+pub struct Tab {
+    pub page: Page,
     entries: Vec<Entry>,
     at: usize,
     scroll: i32,
     load: Option<Load>,
     /// The link or control the keyboard is on.
     ring: Option<NodeId>,
-    /// The caret in the focused field, in characters.
-    caret: usize,
-    refreshes: u8,
+    /// The page came over `https` (not one of the browser's own pages).
+    pub secure: bool,
 }
 
 impl Tab {
-    fn blank() -> Tab {
-        Tab {
-            page: Page::from_html(Url::parse(HOME).unwrap_or_else(|| unreachable!()), ""),
-            entries: Vec::new(),
-            at: 0,
-            scroll: 0,
-            load: None,
-            ring: None,
-            caret: 0,
-            refreshes: 0,
-        }
-    }
-
-    /// The address the tab is at, or going to.
-    pub(crate) fn url(&self) -> &Url {
-        match &self.load {
-            Some(l) => &l.url,
-            None => &self.page.url,
-        }
-    }
-
-    pub(crate) fn title(&self) -> String {
-        if self.load.is_some() {
-            return String::from("Chargement…");
-        }
+    /// What the tab's label says.
+    pub fn title(&self) -> String {
         let t = self.page.title();
+        let t = t.trim();
         if !t.is_empty() {
-            t
-        } else if is_home(&self.page.url) {
+            String::from(t)
+        } else if self.page.url.scheme == "about" {
             String::from("Nouvel onglet")
         } else {
             self.page.url.pretty()
         }
     }
 
-    pub(crate) fn progress(&self) -> Option<(usize, usize)> {
-        self.load.as_ref().map(|l| (l.done, l.total))
+    pub fn loading(&self) -> bool {
+        self.load.is_some()
     }
 
-    fn can_back(&self) -> bool {
-        self.at > 0
-    }
-
-    fn can_forward(&self) -> bool {
-        self.at + 1 < self.entries.len()
-    }
-}
-
-fn is_home(url: &Url) -> bool {
-    url.scheme == "about" && matches!(url.path.as_str(), "accueil" | "" | "blank" | "home" | "newtab")
-}
-
-/// What the pointer is over, when no button is down.
-#[derive(Clone, PartialEq, Eq)]
-pub(crate) enum Hover {
-    Nothing,
-    Link(String),
-    Chrome(chrome::Target),
-}
-
-pub struct Browser {
-    pub(crate) width: i32,
-    pub(crate) height: i32,
-    pub(crate) tabs: Vec<Tab>,
-    pub(crate) current: usize,
-    pub(crate) focus: Focus,
-    pub(crate) address: Line,
-    pub(crate) find: Line,
-    pub(crate) find_open: bool,
-    find_at: usize,
-    pub(crate) menu: bool,
-    pub(crate) bookmarks: Vec<Mark>,
-    pub(crate) visited: Vec<Mark>,
-    pub(crate) suggestions: Vec<Mark>,
-    pub(crate) pick: Option<usize>,
-    buttons: u32,
-    pub(crate) hover: Hover,
-    /// Where the scrollbar's thumb was taken, from its top.
-    drag: Option<i32>,
-    /// Where searches go.
-    pub search: String,
-    dirty: bool,
-}
-
-impl Browser {
-    /// A browser `width` × `height` pixels with one tab on the home page.
-    pub fn new(width: i32, height: i32) -> Browser {
-        let mut b = Browser {
-            width,
-            height,
-            tabs: Vec::new(),
-            current: 0,
-            focus: Focus::Page,
-            address: Line::default(),
-            find: Line::default(),
-            find_open: false,
-            find_at: 0,
-            menu: false,
-            bookmarks: Vec::new(),
-            visited: Vec::new(),
-            suggestions: Vec::new(),
-            pick: None,
-            buttons: 0,
-            hover: Hover::Nothing,
-            drag: None,
-            search: String::from(SEARCH),
-            dirty: true,
-        };
-        b.open_tab(Url::parse(HOME).unwrap_or_else(|| unreachable!()));
-        b
-    }
-
-    /// Opens `typed` (an address, a host, or words to search) in the
-    /// current tab.
-    pub fn open(&mut self, typed: &str) {
-        if let Some(url) = url::from_typed(typed, &self.search) {
-            self.focus = Focus::Page;
-            self.navigate(url, None, How::Push);
+    /// Where the tab is in its history, or will be once the page it is
+    /// going back or forward to has come.
+    fn position(&self) -> usize {
+        match &self.load {
+            Some(Load { kind: Kind::Back(i), .. }) => *i,
+            _ => self.at,
         }
     }
 
-    pub fn bookmark(&mut self, title: &str, url: Url) {
-        self.bookmarks.push(Mark { title: String::from(title), url });
+    pub fn can_go_back(&self) -> bool {
+        self.position() > 0
     }
 
-    /// Asks for everything to be drawn again (the window was covered).
-    pub fn redraw(&mut self) {
-        self.dirty = true;
+    pub fn can_go_forward(&self) -> bool {
+        self.position() + 1 < self.entries.len()
+    }
+}
+
+pub struct Browser {
+    pub tabs: Vec<Tab>,
+    pub current: usize,
+    pub width: i32,
+    pub height: i32,
+    focus: Focus,
+    /// The address bar, while it is being typed in.
+    address: Line,
+    /// The suggestion picked under the address bar, if any.
+    picked: Option<usize>,
+    /// The field being typed in, if the focus is on one.
+    field: Line,
+    /// The find bar: open, its text, and which place found is shown.
+    finding: bool,
+    find: Line,
+    found: usize,
+    menu: bool,
+    pub bookmarks: Vec<Saved>,
+    pub history: Vec<Saved>,
+    pointer: (i32, i32),
+    left: bool,
+    /// The person drags the scroll bar's thumb, grabbed this far below its
+    /// top.
+    dragging: Option<i32>,
+}
+
+impl Browser {
+    /// A browser of `width` × `height` pixels with one tab, on its home page.
+    pub fn new(width: i32, height: i32) -> Browser {
+        let mut b = Browser {
+            tabs: Vec::new(),
+            current: 0,
+            width,
+            height,
+            focus: Focus::Page,
+            address: Line::default(),
+            picked: None,
+            field: Line::default(),
+            finding: false,
+            find: Line::default(),
+            found: 0,
+            menu: false,
+            bookmarks: Vec::new(),
+            history: Vec::new(),
+            pointer: (-1, -1),
+            left: false,
+            dragging: None,
+        };
+        b.new_tab(None);
+        b
     }
 
-    /// Whether something changed since the last [`Browser::draw`].
-    pub fn dirty(&self) -> bool {
-        self.dirty
-    }
-
-    /// Whether a tab waits for the network: call [`Browser::load`].
-    pub fn needs_load(&self) -> bool {
-        self.tabs.iter().any(|t| t.load.is_some())
-    }
-
-    /// The window's title: the current page's.
-    pub fn title(&self) -> String {
-        self.tab().title()
-    }
-
-    pub fn url(&self) -> String {
-        self.tab().url().to_string()
-    }
-
-    pub fn focus(&self) -> Focus {
-        self.focus
-    }
-
-    pub(crate) fn tab(&self) -> &Tab {
+    pub fn tab(&self) -> &Tab {
         &self.tabs[self.current]
     }
 
@@ -337,856 +251,774 @@ impl Browser {
         &mut self.tabs[self.current]
     }
 
-    pub(crate) fn geo(&self) -> chrome::Geo {
-        chrome::Geo { w: self.width, h: self.height, tabs: self.tabs.len(), find: self.find_open }
+    /// The window's title: the page's.
+    pub fn title(&self) -> String {
+        self.tab().title()
     }
 
-    /// The page's viewport in the window.
-    pub(crate) fn view(&self) -> Rect {
-        self.geo().content()
+    /// Whether a tab is still loading (call [`step`](Self::step)).
+    pub fn busy(&self) -> bool {
+        self.tabs.iter().any(|t| t.load.is_some())
     }
 
-    fn view_size(&self) -> (i32, i32) {
-        let (x0, y0, x1, y1) = self.view();
-        ((x1 - x0).max(1), (y1 - y0).max(1))
+    /// The rectangle of the window the page is shown in.
+    pub fn view(&self) -> (i32, i32, i32, i32) {
+        let bottom = if self.finding { self.height - FIND } else { self.height };
+        (0, TABS + BAR, self.width, bottom.max(TABS + BAR + 1))
     }
 
-    /// Lays the current page out for the viewport; its height.
-    fn lay_out(&mut self) -> i32 {
-        let (w, h) = self.view_size();
-        self.tab_mut().page.lay_out(w, h).height
+    fn view_height(&self) -> i32 {
+        let v = self.view();
+        v.3 - v.1
     }
 
-    pub(crate) fn max_scroll(&self) -> i32 {
-        let h = self.tab().page.layout.as_ref().map_or(0, |l| l.height);
-        (h - self.view_size().1).max(0)
-    }
+    // ------------------------------------------------------------ tabs
 
-    fn scroll_to(&mut self, y: i32) {
-        self.lay_out();
-        let max = self.max_scroll();
-        let tab = self.tab_mut();
-        let y = y.clamp(0, max);
-        if tab.scroll != y {
-            tab.scroll = y;
-            self.dirty = true;
-        }
-    }
-
-    fn scroll_by(&mut self, dy: i32) {
-        let y = self.tab().scroll + dy;
-        self.scroll_to(y);
-    }
-
-    /// Scrolls so that page rows `top`..`bottom` are seen.
-    fn reveal(&mut self, top: i32, bottom: i32) {
-        let (_, h) = self.view_size();
-        let s = self.tab().scroll;
-        if top < s {
-            self.scroll_to(top - 16);
-        } else if bottom > s + h {
-            self.scroll_to(bottom - h + 16);
-        }
-    }
-
-    // ------------------------------------------------------------ navigation
-
-    fn navigate(&mut self, url: Url, post: Option<String>, how: How) {
-        let i = self.current;
-        self.go(i, url, post, how);
-    }
-
-    fn go(&mut self, i: usize, url: Url, post: Option<String>, how: How) {
-        if url.scheme == "javascript" {
-            return;
-        }
+    /// Opens a tab after the current one, on `url` (else the home page),
+    /// and shows it.
+    pub fn new_tab(&mut self, url: Option<Url>) {
+        let home = Url::parse(HOME).unwrap_or_else(|| unreachable!());
+        let blank = Page::from_html(home.clone(), "");
+        let tab = Tab { page: blank, entries: Vec::new(), at: 0, scroll: 0, load: None, ring: None, secure: false };
+        let at = if self.tabs.is_empty() { 0 } else { self.current + 1 };
+        self.tabs.insert(at, tab);
+        self.current = at;
+        self.focus = Focus::Page;
         self.menu = false;
-        self.dirty = true;
-        let tab = &mut self.tabs[i];
-        // A jump within the page: no load.
-        if how == How::Push
-            && post.is_none()
-            && url.fragment.is_some()
-            && tab.load.is_none()
-            && url.same_document(&tab.page.url)
-            && !tab.entries.is_empty()
-        {
-            if let Some(e) = tab.entries.get_mut(tab.at) {
-                e.scroll = tab.scroll;
-            }
-            tab.entries.truncate(tab.at + 1);
-            tab.entries.push(Entry { url: url.clone(), post: None, scroll: 0 });
-            tab.at += 1;
-            let y = tab.page.anchor_y(url.fragment.as_deref().unwrap_or("")).unwrap_or(0);
-            tab.page.url = url;
-            if i == self.current {
-                self.scroll_to(y);
-                self.show_address();
-            }
-            return;
-        }
-        if let Some(e) = tab.entries.get_mut(tab.at) {
-            e.scroll = tab.scroll;
-        }
-        if how != How::Replace {
-            tab.refreshes = 0;
-        }
-        let local = url.scheme == "about";
-        tab.load = Some(Load { url, post, how, stage: Stage::Document, done: 0, total: 1 });
-        if i == self.current {
-            if matches!(self.focus, Focus::Field(_)) {
-                self.focus = Focus::Page;
-            }
-            if self.focus != Focus::Address {
-                self.show_address();
-            }
-        }
-        // The browser's own pages come at once.
-        if local {
-            self.step(i, &mut Offline);
+        let blank = url.is_none();
+        self.go(url.unwrap_or(home), None, Kind::New);
+        if blank {
+            self.focus_address();
         }
     }
 
-    fn open_tab(&mut self, url: Url) {
-        self.tabs.push(Tab::blank());
-        self.current = self.tabs.len() - 1;
-        let home = is_home(&url);
-        self.navigate(url, None, How::Push);
-        if home {
-            self.focus = Focus::Address;
-            self.address.clear();
-        } else {
-            self.focus = Focus::Page;
-        }
-        self.find_open = false;
-    }
-
-    fn close_tab(&mut self, i: usize) {
-        if self.tabs.len() == 1 {
-            self.tabs.clear();
-            self.open_tab(Url::parse(HOME).unwrap_or_else(|| unreachable!()));
+    /// Closes tab `i`; the last one closed leaves a new one.
+    pub fn close_tab(&mut self, i: usize) {
+        if i >= self.tabs.len() {
             return;
         }
         self.tabs.remove(i);
-        if self.current > i || self.current == self.tabs.len() {
-            self.current = self.current.saturating_sub(1);
-        }
-        self.switched();
-    }
-
-    fn switch(&mut self, i: usize) {
-        if i < self.tabs.len() && i != self.current {
-            self.current = i;
-            self.switched();
-        }
-    }
-
-    fn switched(&mut self) {
-        self.focus = Focus::Page;
-        self.find_open = false;
-        self.menu = false;
-        self.show_address();
-        self.dirty = true;
-    }
-
-    fn history_step(&mut self, back: bool) {
-        let tab = self.tab_mut();
-        if back && !tab.can_back() || !back && !tab.can_forward() {
+        if self.tabs.is_empty() {
+            self.current = 0;
+            self.new_tab(None);
             return;
         }
+        if self.current > i || self.current >= self.tabs.len() {
+            self.current = self.current.saturating_sub(1);
+        }
+        self.leave_focus();
+    }
+
+    pub fn select_tab(&mut self, i: usize) {
+        if i < self.tabs.len() && i != self.current {
+            self.current = i;
+            self.leave_focus();
+        }
+    }
+
+    fn leave_focus(&mut self) {
+        self.focus = Focus::Page;
+        self.menu = false;
+        self.picked = None;
+        self.finding = false;
+    }
+
+    // ------------------------------------------------------------ going places
+
+    /// Opens what was typed in the address bar: an address, or words to
+    /// search.
+    pub fn open(&mut self, typed: &str) {
+        if let Some(url) = url::from_typed(typed, SEARCH) {
+            self.focus = Focus::Page;
+            self.go(url, None, Kind::New);
+        }
+    }
+
+    /// Starts loading `url` in the current tab. The browser's own pages,
+    /// a jump within the page and what cannot be fetched are shown at once.
+    fn go(&mut self, url: Url, post: Option<String>, kind: Kind) {
+        self.go_in(self.current, url, post, kind, 0);
+    }
+
+    fn go_in(&mut self, t: usize, url: Url, post: Option<String>, kind: Kind, redirects: u8) {
+        self.menu = false;
+        let tab = &mut self.tabs[t];
+        // A jump to an anchor of the page shown.
+        if kind == Kind::New
+            && post.is_none()
+            && url.fragment.is_some()
+            && !tab.entries.is_empty()
+            && url.same_document(&tab.page.url)
+            && tab.load.is_none()
+        {
+            let y = tab.page.anchor_y(url.fragment.as_deref().unwrap_or(""));
+            let title = tab.page.title();
+            Self::push_entry(tab, url.clone(), None, title);
+            tab.page.url = url;
+            if let Some(y) = y {
+                tab.scroll = y;
+            }
+            self.clamp_scroll(t);
+            return;
+        }
+        let name = url.path.clone();
+        match url.scheme.as_str() {
+            "about" => {
+                let html = pages::about(&name, SEARCH, &self.bookmarks, &self.history)
+                    .unwrap_or_else(|| pages::unknown(&name));
+                let page = Page::from_html(url.clone(), &html);
+                self.tabs[t].load = None;
+                self.install(t, page, url, None, kind, redirects);
+            }
+            "http" | "https" | "file" | "view-source" => {
+                self.tabs[t].load =
+                    Some(Load { url, post, kind, stage: Stage::Document, redirects, done: 0, total: 1 });
+            }
+            _ => {
+                let page = Page::from_html(url.clone(), &pages::error(&url, &NetError::Unsupported));
+                self.tabs[t].load = None;
+                self.install(t, page, url, None, kind, redirects);
+            }
+        }
+    }
+
+    fn push_entry(tab: &mut Tab, url: Url, post: Option<String>, title: String) {
         if let Some(e) = tab.entries.get_mut(tab.at) {
             e.scroll = tab.scroll;
         }
-        tab.at = if back { tab.at - 1 } else { tab.at + 1 };
-        let e = &tab.entries[tab.at];
-        let (url, post, scroll) = (e.url.clone(), e.post.clone(), e.scroll);
-        // Back within one document: only scroll.
-        if post.is_none() && tab.load.is_none() && url.same_document(&tab.page.url) {
-            tab.page.url = url;
-            self.scroll_to(scroll);
-            self.show_address();
-            return;
+        if !tab.entries.is_empty() {
+            tab.entries.truncate(tab.at + 1);
         }
-        self.navigate(url, post, How::Revisit(scroll));
+        tab.entries.push(Entry { url, post, title, scroll: 0 });
+        tab.at = tab.entries.len() - 1;
     }
 
-    fn reload(&mut self) {
-        let tab = self.tab();
-        let (url, post) = match tab.entries.get(tab.at) {
-            Some(e) => (e.url.clone(), e.post.clone()),
-            None => (tab.page.url.clone(), None),
-        };
-        let scroll = tab.scroll;
-        self.navigate(url, post, How::Revisit(scroll));
-    }
-
-    /// Shows the current tab's address in the bar.
-    fn show_address(&mut self) {
-        let url = self.tab().url().clone();
-        if is_home(&url) {
-            self.address.clear();
-        } else {
-            self.address.set(&url.to_string());
+    /// Shows a page that has come, in tab `t`.
+    fn install(&mut self, t: usize, mut page: Page, asked: Url, post: Option<String>, kind: Kind, redirects: u8) {
+        let (w, h) = (self.width, self.view_height());
+        page.lay_out(w, h);
+        let title = page.title();
+        let tab = &mut self.tabs[t];
+        // The address shown is where the answer came from, with the anchor asked.
+        if page.url.fragment.is_none() && asked.fragment.is_some() && page.url.same_document(&asked) {
+            page.url.fragment = asked.fragment.clone();
         }
-        self.suggestions.clear();
-        self.pick = None;
-    }
-
-    pub fn run(&mut self, command: Command) {
-        self.menu = false;
-        self.dirty = true;
-        let about = |name: &str| Url::parse(&format!("about:{name}")).unwrap_or_else(|| unreachable!());
-        match command {
-            Command::NewTab => self.open_tab(about("accueil")),
-            Command::CloseTab => self.close_tab(self.current),
-            Command::NextTab => self.switch((self.current + 1) % self.tabs.len()),
-            Command::Back => self.history_step(true),
-            Command::Forward => self.history_step(false),
-            Command::Reload => self.reload(),
-            Command::Home => self.navigate(about("accueil"), None, How::Push),
-            Command::Bookmark => {
-                let url = self.tab().page.url.clone();
-                if let Some(at) = self.bookmarks.iter().position(|m| m.url == url) {
-                    self.bookmarks.remove(at);
-                } else if !url.scheme.eq("about") || !is_home(&url) {
-                    let title = self.tab().page.title();
-                    self.bookmarks.push(Mark { title, url });
-                }
-            }
-            Command::Bookmarks => self.navigate(about("favoris"), None, How::Push),
-            Command::History => self.navigate(about("historique"), None, How::Push),
-            Command::Find => {
-                self.find_open = true;
-                self.focus = Focus::Find;
-                self.find.all = true;
-            }
-            Command::Source => {
-                let url = self.tab().page.url.without_fragment();
-                if url.scheme != "view-source"
-                    && let Some(u) = Url::parse(&format!("view-source:{url}"))
-                {
-                    self.open_tab(u);
-                }
-            }
-            Command::Help => self.navigate(about("aide"), None, How::Push),
-            Command::About => self.navigate(about("a-propos"), None, How::Push),
-        }
-    }
-
-    pub(crate) fn is_bookmarked(&self) -> bool {
-        let url = &self.tab().page.url;
-        self.bookmarks.iter().any(|m| &m.url == url)
-    }
-
-    pub(crate) fn can(&self, command: Command) -> bool {
-        match command {
-            Command::Back => self.tab().can_back(),
-            Command::Forward => self.tab().can_forward(),
-            _ => true,
-        }
-    }
-
-    // ------------------------------------------------------------ loading
-
-    /// Takes one step of a load (a document or a style sheet), the current
-    /// tab's first.
-    pub fn load(&mut self, net: &mut dyn Net) {
-        let Some(i) = (self.tabs[self.current].load.is_some())
-            .then_some(self.current)
-            .or_else(|| self.tabs.iter().position(|t| t.load.is_some()))
-        else {
-            return;
-        };
-        self.step(i, net);
-    }
-
-    /// Takes one step of tab `i`'s load.
-    fn step(&mut self, i: usize, net: &mut dyn Net) {
-        self.dirty = true;
-        let Some(mut load) = self.tabs[i].load.take() else { return };
-        match core::mem::replace(&mut load.stage, Stage::Document) {
-            Stage::Document => {
-                let url = load.url.clone();
-                let book = Book { bookmarks: &self.bookmarks, visited: &self.visited, search: &self.search };
-                let (page, record) = match url.scheme.as_str() {
-                    "about" => match pages::about(&url.path, &book) {
-                        Some(html) => (Page::from_html(url.clone(), &html), false),
-                        None => (Page::from_html(url.clone(), &pages::error(&url, &NetError::Unsupported)), false),
-                    },
-                    "view-source" => {
-                        let inner = match &url.query {
-                            Some(q) => format!("{}?{q}", url.path),
-                            None => url.path.clone(),
-                        };
-                        match Url::parse(&inner).ok_or(NetError::Unsupported).and_then(|u| net.fetch(&u, None)) {
-                            Ok(r) => (Page::new(url.clone(), &r.body, Some("text/plain")), false),
-                            Err(e) => (Page::from_html(url.clone(), &pages::error(&url, &e)), false),
-                        }
-                    }
-                    "http" | "https" | "file" => match net.fetch(&url.without_fragment(), load.post.as_deref()) {
-                        Ok(r) => {
-                            let mut final_url = r.url;
-                            final_url.fragment = url.fragment.clone();
-                            (Page::new(final_url, &r.body, r.content_type.as_deref()), true)
-                        }
-                        Err(e) => (Page::from_html(url.clone(), &pages::error(&url, &e)), false),
-                    },
-                    _ => (Page::from_html(url.clone(), &pages::error(&url, &NetError::Unsupported)), false),
-                };
-                let queue = if record { page.stylesheet_links() } else { Vec::new() };
-                load.done = 1;
-                load.total = 1 + queue.len();
-                if queue.is_empty() && page.imports().is_empty() {
-                    self.finish(i, page, load, record);
+        let url = page.url.clone();
+        let mut scroll = 0;
+        match kind {
+            Kind::New => Self::push_entry(tab, url.clone(), post, title.clone()),
+            Kind::Replace => {
+                if tab.entries.is_empty() {
+                    Self::push_entry(tab, url.clone(), post, title.clone());
                 } else {
-                    load.stage = Stage::Sheets { page: Box::new(page), queue, seen: Vec::new() };
-                    self.tabs[i].load = Some(load);
+                    // Reloading keeps the place in the page.
+                    if tab.page.url.same_document(&url) {
+                        scroll = tab.scroll;
+                    }
+                    let e = &mut tab.entries[tab.at];
+                    (e.url, e.post, e.title) = (url.clone(), post, title.clone());
+                }
+            }
+            Kind::Back(i) => {
+                if let Some(e) = tab.entries.get_mut(tab.at) {
+                    e.scroll = tab.scroll;
+                }
+                tab.at = i.min(tab.entries.len().saturating_sub(1));
+                if let Some(e) = tab.entries.get_mut(tab.at) {
+                    scroll = e.scroll;
+                    e.title = title.clone();
+                }
+            }
+        }
+        if !matches!(kind, Kind::Back(_))
+            && let Some(f) = &url.fragment
+            && let Some(y) = page.anchor_y(f)
+        {
+            scroll = y;
+        }
+        let refresh = page.refresh();
+        let autofocus = page.autofocus();
+        tab.secure = url.scheme == "https";
+        tab.page = page;
+        tab.scroll = scroll;
+        tab.ring = None;
+        self.clamp_scroll(t);
+        if matches!(url.scheme.as_str(), "http" | "https" | "file") {
+            self.history.retain(|s| s.url != url);
+            self.history.insert(0, Saved { title, url: url.clone() });
+            self.history.truncate(HISTORY);
+        }
+        if t == self.current {
+            if self.focus != Focus::Address {
+                self.focus = Focus::Page;
+            }
+            if let Some(n) = autofocus
+                && self.focus == Focus::Page
+            {
+                self.focus_field(n);
+            }
+            if self.finding {
+                self.found = 0;
+            }
+        }
+        if let Some(target) = refresh
+            && redirects < REDIRECTS
+            && target != url
+        {
+            self.go_in(t, target, None, Kind::Replace, redirects + 1);
+        }
+    }
+
+    /// Makes one request for the tab loading (the current one first).
+    /// Returns whether anything changed on screen.
+    pub fn step(&mut self, net: &mut dyn Net) -> bool {
+        let order = core::iter::once(self.current).chain(0..self.tabs.len());
+        let Some(t) = order.into_iter().find(|&t| t < self.tabs.len() && self.tabs[t].load.is_some()) else {
+            return false;
+        };
+        let Some(load) = self.tabs[t].load.take() else { return false };
+        let Load { url, post, kind, stage, redirects, done, total } = load;
+        match stage {
+            Stage::Document => {
+                let (fetched, source) = match url.scheme.as_str() {
+                    "view-source" => match Url::parse(&url.path) {
+                        Some(inner) => (net.fetch(&inner, None), true),
+                        None => (Err(NetError::Unsupported), true),
+                    },
+                    _ => (net.fetch(&url, post.as_deref()), false),
+                };
+                match fetched {
+                    Ok(r) => {
+                        let page = if source {
+                            let mut p = Page::new(url.clone(), &r.body, Some("text/plain"));
+                            p.url = url.clone();
+                            p
+                        } else {
+                            Page::new(r.url, &r.body, r.content_type.as_deref())
+                        };
+                        let queue = page.stylesheet_links();
+                        let total = done + 1 + queue.len();
+                        let stage = Stage::Sheets { page: alloc::boxed::Box::new(page), queue, seen: Vec::new() };
+                        self.tabs[t].load = Some(Load { url, post, kind, stage, redirects, done: done + 1, total });
+                    }
+                    Err(e) => {
+                        let page = Page::from_html(url.clone(), &pages::error(&url, &e));
+                        self.install(t, page, url, post, kind, redirects);
+                        self.tabs[t].secure = false;
+                    }
                 }
             }
             Stage::Sheets { mut page, mut queue, mut seen } => {
-                if !queue.is_empty() {
-                    let (node, sheet) = queue.remove(0);
-                    if !seen.contains(&sheet) {
-                        if let Ok(r) = net.fetch(&sheet, None) {
-                            let text = String::from_utf8_lossy(&r.body).into_owned();
-                            page.add_sheet(node, text, r.url);
-                        }
-                        seen.push(sheet);
-                    }
-                    load.done += 1;
-                }
-                for (node, u) in page.imports() {
-                    if !seen.contains(&u) && !queue.iter().any(|(_, q)| *q == u) && seen.len() < 64 {
-                        queue.push((node, u));
-                        load.total += 1;
-                    }
-                }
                 if queue.is_empty() {
-                    self.finish(i, *page, load, true);
-                } else {
-                    load.stage = Stage::Sheets { page, queue, seen };
-                    self.tabs[i].load = Some(load);
+                    // Every sheet came: what they import, once each.
+                    queue = page.imports().into_iter().filter(|(_, u)| !seen.contains(u)).collect();
+                    if queue.is_empty() {
+                        self.install(t, *page, url, post, kind, redirects);
+                        return true;
+                    }
                 }
+                let (node, sheet) = queue.remove(0);
+                let total = total.max(done + 1 + queue.len());
+                if !seen.contains(&sheet) {
+                    if let Ok(r) = net.fetch(&sheet, None) {
+                        page.add_sheet(node, String::from_utf8_lossy(&r.body).into_owned(), r.url);
+                    }
+                    seen.push(sheet);
+                }
+                let stage = Stage::Sheets { page, queue, seen };
+                self.tabs[t].load = Some(Load { url, post, kind, stage, redirects, done: done + 1, total });
             }
+        }
+        true
+    }
+
+    /// The share of the current tab's load done, in thousandths.
+    pub fn progress(&self) -> Option<i32> {
+        let l = self.tab().load.as_ref()?;
+        Some((l.done as i32 * 900 / l.total.max(1) as i32 + 100).min(1000))
+    }
+
+    pub fn back(&mut self) {
+        let at = self.tab().position();
+        if at > 0 {
+            self.history_go(at - 1);
         }
     }
 
-    fn finish(&mut self, i: usize, page: Page, load: Load, record: bool) {
-        let (w, h) = self.view_size();
-        let tab = &mut self.tabs[i];
-        let entry = Entry { url: page.url.clone(), post: load.post, scroll: 0 };
-        match load.how {
-            How::Push => {
-                if !tab.entries.is_empty() {
-                    tab.entries.truncate(tab.at + 1);
-                }
-                tab.entries.push(entry);
-                tab.at = tab.entries.len() - 1;
-            }
-            How::Replace | How::Revisit(_) if !tab.entries.is_empty() => {
-                let at = tab.at.min(tab.entries.len() - 1);
-                tab.entries[at] = entry;
-            }
-            _ => {
-                tab.entries.push(entry);
-                tab.at = 0;
-            }
+    pub fn forward(&mut self) {
+        let at = self.tab().position();
+        if at + 1 < self.tab().entries.len() {
+            self.history_go(at + 1);
         }
-        tab.page = page;
-        tab.ring = None;
-        let height = tab.page.lay_out(w, h).height;
-        let wanted = match load.how {
-            How::Revisit(s) => s,
-            _ => tab.page.url.fragment.clone().and_then(|f| tab.page.anchor_y(&f)).unwrap_or(0),
+    }
+
+    fn history_go(&mut self, i: usize) {
+        let tab = self.tab_mut();
+        let (url, post) = (tab.entries[i].url.clone(), tab.entries[i].post.clone());
+        // Another place in the same page: no need to load it again.
+        if tab.page.url.same_document(&url) && post.is_none() && tab.load.is_none() {
+            tab.entries[tab.at].scroll = tab.scroll;
+            tab.at = i;
+            tab.scroll = tab.entries[i].scroll;
+            tab.page.url = url;
+            return;
+        }
+        self.focus = Focus::Page;
+        self.go(url, post, Kind::Back(i));
+    }
+
+    /// Loads the page again, or stops loading it.
+    pub fn reload(&mut self) {
+        if self.tab().load.is_some() {
+            self.tab_mut().load = None;
+            return;
+        }
+        let tab = self.tab();
+        let url = tab.page.url.clone();
+        let post = tab.entries.get(tab.at).and_then(|e| e.post.clone());
+        self.focus = Focus::Page;
+        self.go(url, post, Kind::Replace);
+    }
+
+    pub fn home(&mut self) {
+        self.focus = Focus::Page;
+        if let Some(home) = Url::parse(HOME) {
+            self.go(home, None, Kind::New);
+        }
+    }
+
+    /// Whether the page shown is in the bookmarks.
+    pub fn bookmarked(&self) -> bool {
+        let url = &self.tab().page.url;
+        self.bookmarks.iter().any(|s| &s.url == url)
+    }
+
+    /// Adds the page shown to the bookmarks, or takes it out.
+    pub fn toggle_bookmark(&mut self) {
+        let url = self.tab().page.url.clone();
+        if self.bookmarks.iter().any(|s| s.url == url) {
+            self.bookmarks.retain(|s| s.url != url);
+        } else if url.scheme != "about" {
+            let title = self.tab().title();
+            self.bookmarks.push(Saved { title, url });
+        }
+    }
+
+    // ------------------------------------------------------------ scrolling
+
+    fn max_scroll(&self, t: usize) -> i32 {
+        let h = self.tabs[t].page.layout.as_ref().map_or(0, |l| l.height);
+        (h - self.view_height()).max(0)
+    }
+
+    fn clamp_scroll(&mut self, t: usize) {
+        let max = self.max_scroll(t);
+        let tab = &mut self.tabs[t];
+        tab.scroll = tab.scroll.clamp(0, max);
+    }
+
+    pub fn scroll_by(&mut self, dy: i32) {
+        self.tab_mut().scroll += dy;
+        self.clamp_scroll(self.current);
+    }
+
+    pub fn scroll_to(&mut self, y: i32) {
+        self.tab_mut().scroll = y;
+        self.clamp_scroll(self.current);
+    }
+
+    pub fn scroll(&self) -> i32 {
+        self.tab().scroll
+    }
+
+    /// Scrolls so that the page's band from `top` to `bottom` is seen.
+    fn reveal(&mut self, top: i32, bottom: i32) {
+        let h = self.view_height();
+        let s = self.tab().scroll;
+        if top < s + 8 {
+            self.scroll_to(top - 24);
+        } else if bottom > s + h - 8 {
+            self.scroll_to(bottom - h + 24);
+        }
+    }
+
+    /// The page's size changed: lays it out again.
+    pub fn resize(&mut self, width: i32, height: i32) {
+        self.width = width.max(200);
+        self.height = height.max(TABS + BAR + 40);
+        self.relayout();
+    }
+
+    fn relayout(&mut self) {
+        let (w, h) = (self.width, self.view_height());
+        for t in 0..self.tabs.len() {
+            self.tabs[t].page.lay_out(w, h);
+            self.clamp_scroll(t);
+        }
+    }
+
+    // ------------------------------------------------------------ focus
+
+    /// Puts the keys in the address bar, its text all selected.
+    pub fn focus_address(&mut self) {
+        let text = self.address_text();
+        self.address.set(&text);
+        self.focus = Focus::Address;
+        self.picked = None;
+        self.menu = false;
+    }
+
+    /// What the address bar shows when it is not typed in.
+    pub fn address_text(&self) -> String {
+        let tab = self.tab();
+        if let Some(l) = &tab.load {
+            return l.url.to_string();
+        }
+        let url = &tab.page.url;
+        if url.scheme == "about" && url.path == "accueil" { String::new() } else { url.to_string() }
+    }
+
+    fn focus_field(&mut self, node: NodeId) {
+        let value = self.tab().page.field_value(node);
+        self.field = Line::default();
+        self.field.text = value;
+        self.field.end();
+        self.focus = Focus::Field(node);
+        self.tab_mut().ring = Some(node);
+        if let Some((_, y, _, h)) = self.tab().page.rect_of(node) {
+            self.reveal(y, y + h);
+        }
+    }
+
+    pub fn open_find(&mut self) {
+        let was = self.finding;
+        self.finding = true;
+        self.focus = Focus::Find;
+        self.find.all = true;
+        self.find.caret = self.find.len();
+        self.menu = false;
+        if !was {
+            self.relayout();
+        }
+    }
+
+    fn close_find(&mut self) {
+        self.finding = false;
+        self.focus = Focus::Page;
+        self.relayout();
+    }
+
+    /// Shows the next place (or the previous one) the find bar's text is.
+    fn find_next(&mut self, back: bool) {
+        let places = self.tab().page.found_at(&self.find.text);
+        if places.is_empty() {
+            return;
+        }
+        let n = places.len();
+        self.found = match (self.found < n, back) {
+            (false, false) => 0,
+            (false, true) => n - 1,
+            (true, false) => (self.found + 1) % n,
+            (true, true) => (self.found + n - 1) % n,
         };
-        tab.scroll = wanted.clamp(0, (height - h).max(0));
-        let refresh = tab.page.refresh().filter(|_| tab.refreshes < MAX_REFRESHES);
-        if record {
-            self.visited.push(Mark { title: self.tabs[i].page.title(), url: self.tabs[i].page.url.clone() });
-            if self.visited.len() > MAX_VISITED {
-                self.visited.remove(0);
+        let y = places[self.found];
+        self.reveal(y, y + 24);
+    }
+
+    /// The suggestions under the address bar: bookmarks first, then
+    /// history, whose title or address holds what is typed.
+    pub fn suggestions(&self) -> Vec<&Saved> {
+        if self.focus != Focus::Address || self.address.all || self.address.text.trim().is_empty() {
+            return Vec::new();
+        }
+        let typed = self.address.text.trim().to_lowercase();
+        let mut out: Vec<&Saved> = Vec::new();
+        for s in self.bookmarks.iter().chain(self.history.iter()) {
+            let hit = s.url.to_string().to_lowercase().contains(&typed) || s.title.to_lowercase().contains(&typed);
+            if hit && !out.iter().any(|o| o.url == s.url) {
+                out.push(s);
+            }
+            if out.len() == 6 {
+                break;
             }
         }
-        if i == self.current {
-            if self.focus == Focus::Page
-                && let Some(n) = self.tabs[i].page.autofocus()
-            {
-                self.focus = Focus::Field(n);
-                self.tabs[i].caret = self.tabs[i].page.field_value(n).chars().count();
-                self.tabs[i].ring = Some(n);
-            }
-            if self.focus != Focus::Address {
-                self.show_address();
-            }
-            if self.find_open {
-                self.find_at = 0;
-            }
-        }
-        if let Some(url) = refresh {
-            self.tabs[i].refreshes += 1;
-            self.go(i, url, None, How::Replace);
-        }
+        out
     }
 
     // ------------------------------------------------------------ events
 
-    pub fn handle(&mut self, event: Event) {
+    /// Handles what the person did. Returns whether the window must be
+    /// drawn again.
+    pub fn handle(&mut self, event: Event) -> bool {
         match event {
+            Event::Key(key, mods) => {
+                self.key(key, mods);
+                true
+            }
+            Event::Pointer { x, y, left } => {
+                let moved = (x, y) != self.pointer;
+                let pressed = left && !self.left;
+                self.pointer = (x, y);
+                self.left = left;
+                if !left {
+                    self.dragging = None;
+                }
+                if let Some(grab) = self.dragging {
+                    self.drag_thumb(y - grab);
+                    return true;
+                }
+                if pressed {
+                    self.click(x, y);
+                    return true;
+                }
+                moved
+            }
+            Event::Wheel(notches) => {
+                if self.menu {
+                    return false;
+                }
+                self.scroll_by(notches * STEP * 2);
+                true
+            }
             Event::Resize(w, h) => {
-                if (w, h) != (self.width, self.height) {
-                    self.width = w.max(160);
-                    self.height = h.max(TOP + 40);
-                    self.dirty = true;
-                }
+                self.resize(w, h);
+                true
             }
-            Event::Wheel(n) => {
-                self.menu = false;
-                self.scroll_by(n * LINE);
-            }
-            Event::Pointer { x, y, buttons } => self.pointer(x, y, buttons),
-            Event::Ctrl(c) => self.ctrl(c),
-            Event::Char(c) => self.char(c),
-            Event::Key(k) => self.key(k),
         }
     }
 
-    fn ctrl(&mut self, c: char) {
-        let command = match c.to_ascii_lowercase() {
-            't' => Command::NewTab,
-            'w' => Command::CloseTab,
-            '\t' => Command::NextTab,
-            'r' => Command::Reload,
-            'd' => Command::Bookmark,
-            'f' => Command::Find,
-            'h' => Command::History,
-            'b' => Command::Bookmarks,
-            'u' => Command::Source,
-            'l' => {
-                self.edit_address();
-                return;
-            }
-            _ => return,
-        };
-        self.run(command);
-    }
-
-    fn edit_address(&mut self) {
-        self.menu = false;
-        self.focus = Focus::Address;
-        self.show_address();
-        self.dirty = true;
-    }
-
-    fn char(&mut self, c: char) {
-        self.dirty = true;
-        match self.focus {
-            Focus::Address => {
-                self.address.insert(c);
-                self.suggest();
-            }
-            Focus::Find => {
-                self.find.insert(c);
-                self.find_at = 0;
-                self.jump_to_found();
-            }
-            Focus::Field(n) => self.type_in(n, Some(c)),
-            Focus::Page => match c {
-                ' ' => {
-                    let (_, h) = self.view_size();
-                    self.scroll_by(h - LINE);
+    fn key(&mut self, key: Key, mods: Mods) {
+        // What works wherever the keys are.
+        if mods.ctrl {
+            match key {
+                Key::Char('l' | 'L') => return self.focus_address(),
+                Key::Char('t' | 'T') => return self.new_tab(None),
+                Key::Char('w' | 'W') => return self.close_tab(self.current),
+                Key::Char('f' | 'F') => return self.open_find(),
+                Key::Char('d' | 'D') => return self.toggle_bookmark(),
+                Key::Char('r' | 'R') => return self.reload(),
+                Key::Char('h' | 'H') => {
+                    return self.go(Url::parse("about:historique").unwrap_or_else(|| unreachable!()), None, Kind::New);
                 }
-                '/' => self.run(Command::Find),
+                Key::Tab => {
+                    let n = self.tabs.len();
+                    let next = if mods.shift { (self.current + n - 1) % n } else { (self.current + 1) % n };
+                    return self.select_tab(next);
+                }
                 _ => {}
-            },
+            }
         }
-    }
-
-    fn key(&mut self, key: Key) {
-        self.dirty = true;
-        if self.menu && key == Key::Escape {
-            self.menu = false;
+        if mods.alt {
+            match key {
+                Key::Left => return self.back(),
+                Key::Right => return self.forward(),
+                Key::Home => return self.home(),
+                _ => {}
+            }
+        }
+        if self.menu {
+            if key == Key::Escape {
+                self.menu = false;
+            }
             return;
         }
-        match self.focus {
-            Focus::Address => self.address_key(key),
-            Focus::Find => match key {
-                Key::Enter | Key::Down => {
-                    self.find_at += 1;
-                    self.jump_to_found();
-                }
-                Key::Up => {
-                    self.find_at = self.find_at.wrapping_sub(1);
-                    self.jump_to_found();
-                }
-                Key::Backspace => {
-                    self.find.backspace();
-                    self.find_at = 0;
-                    self.jump_to_found();
-                }
-                Key::Delete => self.find.delete(),
-                Key::Left => self.find.go(-1),
-                Key::Right => self.find.go(1),
-                Key::Home => self.find.home(),
-                Key::End => self.find.end(),
-                Key::Escape | Key::Tab => {
-                    self.find_open = false;
-                    self.focus = Focus::Page;
-                }
-                Key::PageUp | Key::PageDown => {}
-            },
-            Focus::Field(n) => self.field_key(n, key),
-            Focus::Page => self.page_key(key),
+        match self.focus.clone() {
+            Focus::Address => self.key_address(key),
+            Focus::Find => self.key_find(key, mods),
+            Focus::Field(node) => self.key_field(node, key, mods),
+            Focus::Page => self.key_page(key, mods),
         }
     }
 
-    fn address_key(&mut self, key: Key) {
+    fn edit(line: &mut Line, key: Key) -> bool {
+        match key {
+            Key::Char(c) if c >= ' ' => line.insert(c),
+            Key::Backspace => line.backspace(),
+            Key::Delete => line.delete(),
+            Key::Left => line.go(-1),
+            Key::Right => line.go(1),
+            Key::Home => line.home(),
+            Key::End => line.end(),
+            _ => return false,
+        }
+        true
+    }
+
+    fn key_address(&mut self, key: Key) {
+        let n = self.suggestions().len();
         match key {
             Key::Enter => {
-                let chosen = self.pick.and_then(|p| self.suggestions.get(p)).map(|m| m.url.clone());
-                self.focus = Focus::Page;
+                let chosen = self.picked.and_then(|i| self.suggestions().get(i).map(|s| s.url.clone()));
+                self.picked = None;
                 match chosen {
-                    Some(url) => self.navigate(url, None, How::Push),
+                    Some(url) => {
+                        self.focus = Focus::Page;
+                        self.go(url, None, Kind::New);
+                    }
                     None => {
                         let typed = self.address.text.clone();
                         self.open(&typed);
                     }
                 }
-                self.suggestions.clear();
-                self.pick = None;
             }
-            Key::Escape | Key::Tab => {
+            Key::Escape => {
                 self.focus = Focus::Page;
-                self.show_address();
+                self.picked = None;
             }
-            Key::Backspace => {
-                self.address.backspace();
-                self.suggest();
-            }
-            Key::Delete => {
-                self.address.delete();
-                self.suggest();
-            }
-            Key::Left => self.address.go(-1),
-            Key::Right => self.address.go(1),
-            Key::Home => self.address.home(),
-            Key::End => self.address.end(),
-            Key::Down if !self.suggestions.is_empty() => {
-                self.pick = Some(self.pick.map_or(0, |p| (p + 1) % self.suggestions.len()));
-            }
-            Key::Up if !self.suggestions.is_empty() => {
-                self.pick = match self.pick {
-                    None | Some(0) => None,
-                    Some(p) => Some(p - 1),
-                };
-            }
-            _ => {}
-        }
-    }
-
-    /// What the address bar suggests for what is typed: bookmarks, then
-    /// pages visited, the latest first.
-    fn suggest(&mut self) {
-        self.pick = None;
-        self.suggestions.clear();
-        let typed = self.address.text.trim().to_lowercase();
-        if typed.is_empty() {
-            return;
-        }
-        for m in self.bookmarks.iter().chain(self.visited.iter().rev()) {
-            let hit = m.url.to_string().to_lowercase().contains(&typed) || m.title.to_lowercase().contains(&typed);
-            if hit && !self.suggestions.iter().any(|s| s.url == m.url) {
-                self.suggestions.push(m.clone());
-                if self.suggestions.len() == 6 {
-                    break;
+            Key::Down if n > 0 => self.picked = Some(self.picked.map_or(0, |i| (i + 1) % n)),
+            Key::Up if n > 0 => self.picked = Some(self.picked.map_or(n - 1, |i| (i + n - 1) % n)),
+            Key::Tab => self.focus = Focus::Page,
+            k => {
+                if Self::edit(&mut self.address, k) {
+                    self.picked = None;
                 }
             }
         }
     }
 
-    fn page_key(&mut self, key: Key) {
-        let (_, h) = self.view_size();
+    fn key_find(&mut self, key: Key, mods: Mods) {
         match key {
-            Key::Up => self.scroll_by(-LINE),
-            Key::Down => self.scroll_by(LINE),
-            Key::PageUp => self.scroll_by(-(h - LINE)),
-            Key::PageDown => self.scroll_by(h - LINE),
-            Key::Home => self.scroll_to(0),
-            Key::End => self.scroll_to(i32::MAX / 2),
-            Key::Backspace => self.history_step(true),
-            Key::Escape => self.edit_address(),
-            Key::Tab => self.next_focusable(),
-            Key::Enter => {
-                if let Some(n) = self.tab().ring {
-                    self.activate(n, false);
+            Key::Enter => self.find_next(mods.shift),
+            Key::Escape => self.close_find(),
+            Key::Tab => self.focus = Focus::Page,
+            k => {
+                if Self::edit(&mut self.find, k) {
+                    self.found = usize::MAX;
+                    self.find_next(false);
                 }
             }
-            Key::Left | Key::Right | Key::Delete => {}
         }
     }
 
-    /// Moves the keyboard to the page's next link or control.
-    fn next_focusable(&mut self) {
-        self.lay_out();
-        let tab = self.tab();
-        let all = tab.page.focusable();
-        if all.is_empty() {
-            return;
-        }
-        let next = match tab.ring.and_then(|r| all.iter().position(|&n| n == r)) {
-            Some(i) => all[(i + 1) % all.len()],
-            None => {
-                // The first one at or below the top of what is seen.
-                let s = tab.scroll;
-                all.iter().copied().find(|&n| tab.page.rect_of(n).is_some_and(|r| r.1 >= s)).unwrap_or(all[0])
-            }
-        };
-        let text = self.tab().page.is_text_field(next);
-        let tab = self.tab_mut();
-        tab.ring = Some(next);
-        if let Some((_, y, _, h)) = tab.page.rect_of(next) {
-            self.reveal(y, y + h);
-        }
-        if text {
-            self.focus_field(next);
-        } else {
-            self.focus = Focus::Page;
-        }
-    }
-
-    fn focus_field(&mut self, n: NodeId) {
-        let tab = self.tab_mut();
-        tab.caret = tab.page.field_value(n).chars().count();
-        tab.ring = Some(n);
-        self.focus = Focus::Field(n);
-        self.dirty = true;
-    }
-
-    /// Types `c` in the field `n` (`None`: nothing, to fix the caret).
-    fn type_in(&mut self, n: NodeId, c: Option<char>) {
-        let tab = self.tab_mut();
-        let mut value = tab.page.field_value(n);
-        let caret = tab.caret.min(value.chars().count());
-        if let Some(c) = c {
-            value.insert(byte_at(&value, caret), c);
-            tab.caret = caret + 1;
-            tab.page.set_field_value(n, value);
-        }
-    }
-
-    fn field_key(&mut self, n: NodeId, key: Key) {
-        let textarea = self.tab().page.doc.is(n, "textarea");
-        let tab = self.tab_mut();
-        let mut value = tab.page.field_value(n);
-        let len = value.chars().count();
-        let caret = tab.caret.min(len);
+    fn key_field(&mut self, node: NodeId, key: Key, mods: Mods) {
+        let textarea = self.tab().page.doc.is(node, "textarea");
         match key {
             Key::Enter if textarea => {
-                self.type_in(n, Some('\n'));
+                self.field.insert('\n');
+                self.store_field(node);
             }
-            Key::Enter => {
-                if let Some(s) = self.tab().page.submit(n) {
-                    self.focus = Focus::Page;
-                    self.navigate(s.url, s.post, How::Push);
+            Key::Enter => self.submit(node),
+            Key::Escape => self.focus = Focus::Page,
+            Key::Tab => self.next_focusable(mods.shift),
+            Key::Up | Key::Down => {}
+            k => {
+                if Self::edit(&mut self.field, k) {
+                    self.store_field(node);
                 }
             }
-            Key::Backspace if caret > 0 => {
-                value.remove(byte_at(&value, caret - 1));
-                tab.caret = caret - 1;
-                tab.page.set_field_value(n, value);
+        }
+    }
+
+    fn store_field(&mut self, node: NodeId) {
+        let text = self.field.text.clone();
+        let (w, h) = (self.width, self.view_height());
+        let page = &mut self.tab_mut().page;
+        page.set_field_value(node, text);
+        page.lay_out(w, h);
+    }
+
+    fn key_page(&mut self, key: Key, mods: Mods) {
+        let h = self.view_height();
+        match key {
+            Key::Up => self.scroll_by(-STEP),
+            Key::Down => self.scroll_by(STEP),
+            Key::PageUp => self.scroll_by(-(h - 48)),
+            Key::PageDown => self.scroll_by(h - 48),
+            Key::Char(' ') => self.scroll_by(if mods.shift { -(h - 48) } else { h - 48 }),
+            Key::Home => self.scroll_to(0),
+            Key::End => self.scroll_to(i32::MAX / 2),
+            Key::Backspace => self.back(),
+            Key::Tab => self.next_focusable(mods.shift),
+            Key::Enter => {
+                if let Some(n) = self.tab().ring {
+                    self.activate(n);
+                }
             }
-            Key::Delete if caret < len => {
-                value.remove(byte_at(&value, caret));
-                tab.page.set_field_value(n, value);
-            }
-            Key::Left => tab.caret = caret.saturating_sub(1),
-            Key::Right => tab.caret = (caret + 1).min(len),
-            Key::Home => tab.caret = 0,
-            Key::End => tab.caret = len,
-            Key::Escape => self.focus = Focus::Page,
-            Key::Tab => self.next_focusable(),
-            Key::Up | Key::Down | Key::PageUp | Key::PageDown => {
-                self.focus = Focus::Page;
-                self.page_key(key);
+            Key::Escape => {
+                if self.tab().load.is_some() {
+                    self.tab_mut().load = None;
+                } else {
+                    self.tab_mut().ring = None;
+                }
             }
             _ => {}
         }
     }
 
-    fn jump_to_found(&mut self) {
-        self.lay_out();
-        let found = self.tab().page.found_at(&self.find.text);
-        if found.is_empty() {
+    /// Moves the keyboard to the next link or control (the previous one
+    /// with `back`).
+    fn next_focusable(&mut self, back: bool) {
+        let list = self.tab().page.focusable();
+        if list.is_empty() {
             return;
         }
-        let k = self.find_at % found.len();
-        self.find_at = k;
-        let (_, h) = self.view_size();
-        self.scroll_to(found[k] - h / 3);
-    }
-
-    /// The find bar's count: the match shown and how many there are.
-    pub(crate) fn found(&self) -> (usize, usize) {
-        let n = self.tab().page.count(&self.find.text);
-        (if n == 0 { 0 } else { self.find_at % n + 1 }, n)
-    }
-
-    // ------------------------------------------------------------ pointer
-
-    fn pointer(&mut self, x: i32, y: i32, buttons: u32) {
-        let pressed = buttons & !self.buttons;
-        self.buttons = buttons;
-        if let Some(grab) = self.drag {
-            if buttons & LEFT != 0 {
-                self.drag_thumb(y - grab);
-                return;
-            }
-            self.drag = None;
-        }
-        let target = self.geo().target(self, x, y);
-        if pressed == 0 {
-            let hover = match target {
-                chrome::Target::Page => self.link_at(x, y).map_or(Hover::Nothing, Hover::Link),
-                t => Hover::Chrome(t),
-            };
-            if hover != self.hover {
-                self.hover = hover;
-                self.dirty = true;
-            }
-            return;
-        }
-        self.dirty = true;
-        let right = pressed & RIGHT != 0;
-        if self.menu && !matches!(target, chrome::Target::MenuItem(_) | chrome::Target::Menu) {
-            self.menu = false;
-            return;
-        }
-        use chrome::Target as T;
-        match target {
-            T::Tab(i) => self.switch(i),
-            T::CloseTab(i) => self.close_tab(i),
-            T::NewTab => self.run(Command::NewTab),
-            T::Back => self.run(Command::Back),
-            T::Forward => self.run(Command::Forward),
-            T::Reload => self.run(Command::Reload),
-            T::Home => self.run(Command::Home),
-            T::Star => self.run(Command::Bookmark),
-            T::Menu => self.menu = !self.menu,
-            T::MenuItem(i) => self.run(MENU[i].1),
-            T::Address => {
-                if self.focus != Focus::Address {
-                    self.edit_address();
-                } else {
-                    self.address.end();
-                }
-            }
-            T::Suggestion(i) => {
-                if let Some(m) = self.suggestions.get(i) {
-                    let url = m.url.clone();
-                    self.focus = Focus::Page;
-                    self.navigate(url, None, How::Push);
-                }
-            }
-            T::FindPrev => {
-                self.find_at = self.find_at.wrapping_sub(1);
-                self.jump_to_found();
-            }
-            T::FindNext => {
-                self.find_at += 1;
-                self.jump_to_found();
-            }
-            T::FindClose => {
-                self.find_open = false;
-                self.focus = Focus::Page;
-            }
-            T::FindField => self.focus = Focus::Find,
-            T::Scrollbar => self.press_scrollbar(y),
-            T::Strip | T::Toolbar => {}
-            T::Page => {
-                if self.focus == Focus::Address {
-                    self.focus = Focus::Page;
-                    self.show_address();
-                }
-                let (px, py) = self.page_point(x, y);
-                self.lay_out();
-                match self.tab().page.node_at(px, py) {
-                    Some(n) => self.activate(n, right),
-                    None => {
-                        self.focus = Focus::Page;
-                        self.tab_mut().ring = None;
-                    }
-                }
-            }
-        }
-    }
-
-    /// The page point under window point (x, y).
-    fn page_point(&self, x: i32, y: i32) -> (i32, i32) {
-        let (x0, y0, _, _) = self.view();
-        (x - x0, y - y0 + self.tab().scroll)
-    }
-
-    fn link_at(&mut self, x: i32, y: i32) -> Option<String> {
-        if self.tab().load.is_some() && self.tab().page.layout.is_none() {
-            return None;
-        }
-        let (px, py) = self.page_point(x, y);
-        self.lay_out();
-        let page = &self.tab().page;
-        let node = page.node_at(px, py)?;
-        page.link_of(node).map(|(_, u)| u.pretty())
-    }
-
-    /// What a click (or Entrée) on `node` does: follow a link, focus a
-    /// field, submit a form, tick a box, pick the next option.
-    fn activate(&mut self, node: NodeId, new_tab: bool) {
-        let page = &self.tab().page;
-        if let Some((_, url)) = page.link_of(node) {
-            if new_tab {
-                let keep = self.current;
-                self.open_tab(url);
-                // A link opened aside: the person stays where they were.
-                self.current = keep;
-                self.switched();
-            } else {
-                self.navigate(url, None, How::Push);
-            }
-            return;
-        }
-        let mut control = page.ancestor(node, &["input", "button", "select", "textarea", "label"]);
-        if let Some(c) = control
-            && page.doc.is(c, "label")
-        {
-            let e = page.doc.element(c);
-            control = e.and_then(|e| e.attr("for")).and_then(|id| page.doc.by_id(id)).or_else(|| {
-                page.doc.descendants(c).into_iter().find(|&n| page.doc.is(n, "input") || page.doc.is(n, "select"))
-            });
-        }
-        let Some(c) = control else {
-            self.focus = Focus::Page;
-            self.tab_mut().ring = None;
-            return;
+        let at = self.tab().ring.and_then(|r| list.iter().position(|&n| n == r));
+        let n = list.len();
+        let next = match (at, back) {
+            (None, false) => 0,
+            (None, true) => n - 1,
+            (Some(i), false) => (i + 1) % n,
+            (Some(i), true) => (i + n - 1) % n,
         };
-        self.tab_mut().ring = Some(c);
-        let page = &self.tab().page;
-        if page.is_text_field(c) {
-            self.focus_field(c);
-        } else if page.is_submit(c) {
-            if let Some(s) = page.submit(c) {
-                self.focus = Focus::Page;
-                self.navigate(s.url, s.post, How::Push);
-            }
-        } else if page.doc.is(c, "select") {
-            self.focus = Focus::Page;
-            self.next_option(c);
-        } else if page.doc.is(c, "input") {
-            self.focus = Focus::Page;
-            self.tab_mut().page.toggle(c);
+        let node = list[next];
+        if self.tab().page.is_text_field(node) {
+            self.focus_field(node);
         } else {
             self.focus = Focus::Page;
+            self.tab_mut().ring = Some(node);
+            if let Some((_, y, _, h)) = self.tab().page.rect_of(node) {
+                self.reveal(y, y + h);
+            }
         }
     }
 
-    /// Picks the option after the chosen one of `select`.
+    /// What a click on (or Entrée on) `node` of the page does.
+    fn activate(&mut self, node: NodeId) {
+        let page = &self.tab().page;
+        if page.is_text_field(node) {
+            return self.focus_field(node);
+        }
+        if page.is_submit(node) {
+            return self.submit(node);
+        }
+        if let Some((_, url)) = page.link_of(node) {
+            self.focus = Focus::Page;
+            return self.go(url, None, Kind::New);
+        }
+        let Some(e) = page.doc.element(node) else { return };
+        let kind = e.attr("type").unwrap_or("").to_ascii_lowercase();
+        match e.name.as_str() {
+            "input" if kind == "checkbox" || kind == "radio" => {
+                self.tab_mut().page.toggle(node);
+                self.tab_mut().ring = Some(node);
+                self.relayout();
+            }
+            "select" => {
+                self.next_option(node);
+                self.tab_mut().ring = Some(node);
+            }
+            "label" => {
+                // A label gives its click to its field.
+                let target = e
+                    .attr("for")
+                    .and_then(|id| page.doc.by_id(id))
+                    .or_else(|| page.doc.descendants(node).into_iter().find(|&n| page.focusable().contains(&n)));
+                if let Some(t) = target
+                    && t != node
+                {
+                    self.activate(t);
+                }
+            }
+            _ => {
+                if self.focus != Focus::Page {
+                    self.focus = Focus::Page;
+                }
+                self.tab_mut().ring = None;
+            }
+        }
+    }
+
+    /// A list (`<select>`) shows its next choice.
     fn next_option(&mut self, select: NodeId) {
         let page = &mut self.tab_mut().page;
         let options: Vec<NodeId> =
@@ -1194,11 +1026,11 @@ impl Browser {
         if options.is_empty() {
             return;
         }
-        let chosen = options
+        let at = options
             .iter()
             .position(|&o| page.doc.element(o).is_some_and(|e| e.attr("selected").is_some()))
             .unwrap_or(0);
-        let next = options[(chosen + 1) % options.len()];
+        let next = options[(at + 1) % options.len()];
         for &o in &options {
             if let Some(e) = page.doc.element_mut(o) {
                 e.attrs.retain(|(k, _)| k != "selected");
@@ -1208,63 +1040,318 @@ impl Browser {
             }
         }
         page.invalidate();
+        self.relayout();
     }
 
-    pub(crate) fn thumb(&self) -> Option<(i32, i32)> {
-        let (_, h) = self.view_size();
-        let full = self.tab().page.layout.as_ref()?.height;
-        if full <= h {
-            return None;
-        }
-        let size = (h * h / full).max(24).min(h);
-        let max = self.max_scroll().max(1);
-        let top = self.tab().scroll * (h - size) / max;
-        Some((top, size))
-    }
-
-    fn press_scrollbar(&mut self, y: i32) {
-        let (_, y0, _, _) = self.view();
-        let Some((top, size)) = self.thumb() else { return };
-        let at = y - y0;
-        if at >= top && at < top + size {
-            self.drag = Some(at - top + y0);
-        } else {
-            // Page up or down toward the click.
-            let (_, h) = self.view_size();
-            self.scroll_by(if at < top { -(h - LINE) } else { h - LINE });
+    fn submit(&mut self, node: NodeId) {
+        if let Some(s) = self.tab().page.submit(node) {
+            self.focus = Focus::Page;
+            self.go(s.url, s.post, Kind::New);
         }
     }
 
-    fn drag_thumb(&mut self, thumb_top: i32) {
-        let Some((_, size)) = self.thumb() else { return };
-        let (_, h) = self.view_size();
-        let room = (h - size).max(1);
-        let y = thumb_top.clamp(0, room) * self.max_scroll() / room;
-        self.scroll_to(y);
+    fn click(&mut self, x: i32, y: i32) {
+        if let Some(action) = chrome::hit(self, x, y) {
+            if !matches!(action, chrome::Action::Menu(_) | chrome::Action::MenuButton) {
+                self.menu = false;
+            }
+            return self.act(action);
+        }
+        self.menu = false;
+        let (vx, vy, vx1, vy1) = self.view();
+        if x < vx || x >= vx1 || y < vy || y >= vy1 {
+            return;
+        }
+        let (px, py) = (x - vx, y - vy + self.tab().scroll);
+        match self.tab().page.node_at(px, py) {
+            Some(node) => {
+                // The innermost element that does something.
+                let page = &self.tab().page;
+                let target = page.ancestor(node, &["a", "area", "input", "button", "select", "textarea", "label"]);
+                match target {
+                    Some(t) => self.activate(t),
+                    None => {
+                        self.focus = Focus::Page;
+                        self.tab_mut().ring = None;
+                    }
+                }
+            }
+            None => self.focus = Focus::Page,
+        }
+    }
+
+    fn act(&mut self, action: chrome::Action) {
+        use chrome::Action;
+        match action {
+            Action::Tab(i) => self.select_tab(i),
+            Action::CloseTab(i) => self.close_tab(i),
+            Action::NewTab => self.new_tab(None),
+            Action::Back => self.back(),
+            Action::Forward => self.forward(),
+            Action::Reload => self.reload(),
+            Action::Home => self.home(),
+            Action::Address => {
+                if self.focus != Focus::Address {
+                    self.focus_address();
+                } else {
+                    self.address.all = false;
+                }
+            }
+            Action::Suggestion(i) => {
+                if let Some(url) = self.suggestions().get(i).map(|s| s.url.clone()) {
+                    self.focus = Focus::Page;
+                    self.go(url, None, Kind::New);
+                }
+            }
+            Action::Star => self.toggle_bookmark(),
+            Action::MenuButton => self.menu = !self.menu,
+            Action::Menu(item) => {
+                self.menu = false;
+                let about = |name: &str| Url::parse(&alloc::format!("about:{name}"));
+                match item {
+                    chrome::MenuItem::NewTab => self.new_tab(None),
+                    chrome::MenuItem::Find => self.open_find(),
+                    chrome::MenuItem::Page(name) => {
+                        if let Some(u) = about(name) {
+                            self.focus = Focus::Page;
+                            self.go(u, None, Kind::New);
+                        }
+                    }
+                }
+            }
+            Action::FindField => self.focus = Focus::Find,
+            Action::FindNext(back) => self.find_next(back),
+            Action::FindClose => self.close_find(),
+            Action::Thumb(grab) => self.dragging = Some(grab),
+            Action::Track(y) => {
+                let h = self.view_height();
+                let s = self.tab().scroll;
+                self.scroll_to(if y < chrome::thumb(self).map_or(0, |t| t.0) { s - (h - 48) } else { s + (h - 48) });
+            }
+        }
+    }
+
+    /// The thumb of the scroll bar is dragged to `top` (window pixels).
+    fn drag_thumb(&mut self, top: i32) {
+        let (_, vy, _, vy1) = self.view();
+        let Some((_, len)) = chrome::thumb(self) else { return };
+        let room = (vy1 - vy - len).max(1);
+        let max = self.max_scroll(self.current);
+        self.scroll_to(((top - vy).clamp(0, room) as i64 * max as i64 / room as i64) as i32);
     }
 
     // ------------------------------------------------------------ drawing
 
-    /// Draws the browser on `canvas` (its size: the browser's).
+    /// Draws the whole browser on `canvas` (as large as the browser).
     pub fn draw(&mut self, canvas: &mut Canvas) {
-        self.lay_out();
+        let (w, h) = (self.width, self.view_height());
         let view = self.view();
-        let tab = self.tab();
+        let scroll = self.tab().scroll;
         let overlay = Overlay {
-            focus: match self.focus {
-                Focus::Field(n) => Some((n, tab.caret)),
+            focus: match &self.focus {
+                Focus::Field(n) => Some((*n, self.field.caret)),
                 _ => None,
             },
-            ring: tab.ring,
-            found: (self.find_open && !self.find.is_empty()).then(|| self.find.text.clone()),
+            // Drawn by the browser itself, around links too (see `chrome`).
+            ring: None,
+            found: (self.finding && !self.find.text.is_empty()).then(|| self.find.text.clone()),
         };
-        if let Some(layout) = &tab.page.layout {
-            paint::paint(layout, canvas, view, tab.scroll, &overlay);
-        }
+        let page = &mut self.tabs[self.current].page;
+        let layout = page.lay_out(w, h);
+        hln_web::paint::paint(layout, canvas, view, scroll, &overlay);
         chrome::draw(self, canvas);
-        self.dirty = false;
+    }
+
+    /// The link under the pointer, for the bubble at the bottom.
+    fn hovered_link(&self) -> Option<Url> {
+        let (x, y) = self.pointer;
+        let (vx, vy, vx1, vy1) = self.view();
+        if x < vx || x >= vx1 || y < vy || y >= vy1 || self.menu {
+            return None;
+        }
+        let page = &self.tab().page;
+        let node = page.node_at(x - vx, y - vy + self.tab().scroll)?;
+        page.link_of(node).map(|(_, u)| u)
     }
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::*;
+
+    use net::Response;
+
+    /// A network of a few pages, counting the requests.
+    struct Pages(Vec<(&'static str, &'static str)>, usize);
+
+    impl Net for Pages {
+        fn fetch(&mut self, url: &Url, post: Option<&str>) -> Result<Response, NetError> {
+            self.1 += 1;
+            let key = url.without_fragment().to_string();
+            let body = self.0.iter().find(|(u, _)| *u == key).map(|(_, b)| *b);
+            match body {
+                Some(b) => Ok(Response {
+                    url: url.clone(),
+                    status: 200,
+                    content_type: Some(String::from(if key.ends_with(".css") { "text/css" } else { "text/html" })),
+                    body: alloc::format!("{b}{}", post.unwrap_or("")).into_bytes(),
+                }),
+                None => Err(NetError::Failed(String::from("Aucune réponse."))),
+            }
+        }
+    }
+
+    fn net() -> Pages {
+        Pages(
+            alloc::vec![
+                (
+                    "https://a.fr/",
+                    "<title>A</title><link rel=stylesheet href=s.css><p><a href=/b>vers B</a></p><div style='height:3000px'></div><p id=bas>bas</p>"
+                ),
+                ("https://a.fr/s.css", "@import 'i.css'; p { margin: 0 }"),
+                ("https://a.fr/i.css", "body { margin: 0 }"),
+                (
+                    "https://a.fr/b",
+                    "<title>B</title><form action=/c method=post><input name=q autofocus><button>OK</button></form>"
+                ),
+                ("https://a.fr/c", "<title>C</title>reçu : "),
+            ],
+            0,
+        )
+    }
+
+    fn settle(b: &mut Browser, n: &mut dyn Net) {
+        for _ in 0..50 {
+            if !b.step(n) {
+                return;
+            }
+        }
+        panic!("the load never ends");
+    }
+
+    fn typed(b: &mut Browser, text: &str) {
+        for c in text.chars() {
+            b.handle(Event::Key(Key::Char(c), Mods::NONE));
+        }
+    }
+
+    #[test]
+    fn starts_home_with_the_address_bar_ready() {
+        let mut b = Browser::new(800, 600);
+        assert_eq!(b.tab().page.url.to_string(), "about:accueil");
+        assert!(b.focus == Focus::Address);
+        assert_eq!(b.title(), "Nouvel onglet");
+        let mut canvas = Canvas::new(800, 600);
+        b.draw(&mut canvas);
+    }
+
+    #[test]
+    fn loads_in_stages_and_goes_back() {
+        let mut b = Browser::new(800, 600);
+        let mut n = net();
+        typed(&mut b, "a.fr");
+        b.handle(Event::Key(Key::Enter, Mods::NONE));
+        assert!(b.busy());
+        settle(&mut b, &mut n);
+        // The document, its sheet, then what the sheet imports.
+        assert_eq!(n.1, 3);
+        assert_eq!(b.title(), "A");
+        assert_eq!(b.history[0].url.to_string(), "https://a.fr/");
+        // A jump to an anchor loads nothing.
+        b.go(Url::parse("https://a.fr/#bas").unwrap(), None, Kind::New);
+        assert!(!b.busy() && b.scroll() > 2000);
+        b.back();
+        assert_eq!(b.scroll(), 0);
+        // Following a link, then a form posted from a field focused by itself.
+        let link = b.tab().page.doc.find("a").unwrap();
+        b.activate(link);
+        settle(&mut b, &mut n);
+        assert_eq!(b.title(), "B");
+        assert!(matches!(b.focus, Focus::Field(_)));
+        typed(&mut b, "âne");
+        b.handle(Event::Key(Key::Enter, Mods::NONE));
+        settle(&mut b, &mut n);
+        assert_eq!(b.title(), "C");
+        assert!(b.tab().page.doc.text_content(0).contains("q=%C3%A2ne"));
+        b.back();
+        b.back();
+        settle(&mut b, &mut n);
+        assert_eq!(b.title(), "A");
+        assert!(b.tab().can_go_forward());
+    }
+
+    #[test]
+    fn errors_are_pages() {
+        let mut b = Browser::new(800, 600);
+        b.open("https://ailleurs.fr/");
+        settle(&mut b, &mut net::Offline);
+        assert_eq!(b.title(), "Pas de réseau");
+        assert_eq!(b.tab().page.url.to_string(), "https://ailleurs.fr/");
+        b.go(Url::parse("mailto:ane@exemple.fr").unwrap(), None, Kind::New);
+        assert_eq!(b.title(), "Adresse non prise en charge");
+        b.open("about:rien");
+        assert_eq!(b.title(), "Page inconnue");
+    }
+
+    #[test]
+    fn tabs_bookmarks_and_suggestions() {
+        let mut b = Browser::new(800, 600);
+        let mut n = net();
+        b.open("https://a.fr/");
+        settle(&mut b, &mut n);
+        b.toggle_bookmark();
+        assert!(b.bookmarked());
+        b.handle(Event::Key(Key::Char('t'), Mods::CTRL));
+        assert_eq!((b.tabs.len(), b.current), (2, 1));
+        typed(&mut b, "a.");
+        assert_eq!(b.suggestions().len(), 1);
+        b.handle(Event::Key(Key::Down, Mods::NONE));
+        b.handle(Event::Key(Key::Enter, Mods::NONE));
+        settle(&mut b, &mut n);
+        assert_eq!(b.title(), "A");
+        b.handle(Event::Key(Key::Char('w'), Mods::CTRL));
+        b.handle(Event::Key(Key::Char('w'), Mods::CTRL));
+        assert_eq!(b.tabs.len(), 1);
+        assert_eq!(b.tab().page.url.to_string(), "about:accueil");
+        b.open("about:favoris");
+        assert!(b.tab().page.doc.text_content(0).contains("A"));
+    }
+
+    #[test]
+    fn find_scrolls_to_the_text() {
+        let mut b = Browser::new(800, 600);
+        let mut n = net();
+        b.open("https://a.fr/");
+        settle(&mut b, &mut n);
+        b.handle(Event::Key(Key::Char('f'), Mods::CTRL));
+        typed(&mut b, "bas");
+        assert!(b.scroll() > 2000);
+        b.handle(Event::Key(Key::Escape, Mods::NONE));
+        assert!(!b.finding);
+    }
+
+    #[test]
+    fn clicks_on_the_chrome_and_the_page() {
+        let mut b = Browser::new(800, 600);
+        let mut n = net();
+        b.open("https://a.fr/");
+        settle(&mut b, &mut n);
+        let mut canvas = Canvas::new(800, 600);
+        b.draw(&mut canvas);
+        // The link, at the page's top left.
+        b.handle(Event::Pointer { x: 10, y: TABS + BAR + 8, left: true });
+        b.handle(Event::Pointer { x: 10, y: TABS + BAR + 8, left: false });
+        settle(&mut b, &mut n);
+        assert_eq!(b.title(), "B");
+        let (x, y) = chrome::center(&b, chrome::Action::Back).unwrap();
+        b.handle(Event::Pointer { x, y, left: true });
+        b.handle(Event::Pointer { x, y, left: false });
+        settle(&mut b, &mut n);
+        assert_eq!(b.title(), "A");
+        let (x, y) = chrome::center(&b, chrome::Action::NewTab).unwrap();
+        b.handle(Event::Pointer { x, y, left: true });
+        assert_eq!(b.tabs.len(), 2);
+        b.draw(&mut canvas);
+        assert_eq!(b.tabs[0].title().to_string(), "A");
+    }
+}
