@@ -2,6 +2,43 @@
 
 À lire en premier par la session suivante. Le plus récent en haut.
 
+## 2026-10-14 (après-midi) — Premier essai de Stef, et ce qu'il a changé
+
+Retours de Stef sur le premier essai dans Holarch :
+1. **Frappe très lente.** Mesuré dans l'interpréteur d'alpha-2 copié, en
+   1920 × 1040 : 0,35 s par touche dans la barre d'adresse sur l'accueil,
+   0,55 s sur pypi.org ; et dans un champ de la page, le moteur refaisait
+   toute la mise en page (feuilles relues, styles, blocs) à chaque
+   lettre. Corrigé :
+   - un champ garde sa taille : son texte est remplacé dans la mise en
+     page (`Page::set_field_value`, `patch`), sans la refaire ;
+   - le navigateur garde l'image de la page (`Browser::painted`, clé :
+     `Page::generation`, vue, défilement, surimpression) et ne la
+     repeint pas quand seul le haut change ; quand seuls des champs ont
+     changé (`Page::patched_since`), il ne repeint que leur rectangle
+     (`paint::paint_part`). Un essai vérifie que l'image est la même
+     qu'une peinture entière.
+   - Résultat : ~0,06 s par touche partout, au lieu de 0,3 à 0,55 s.
+2. **pipy.com : fond uni.** Stef a tapé pipy.com, pas pypi.org ; ce site
+   n'est pas joignable d'ici (proxy). Très probablement une page faite en
+   JavaScript (non vérifié).
+3. **google.com : mise en page désordonnée, pas d'images.** Attendu :
+   pas encore d'images ni de grille CSS ni de JavaScript.
+4. **« continuer à rechercher » sans le « à ».** Le système ne donne pas
+   le type de contenu ; Google envoie du Latin-1 sous un `<meta>` qui dit
+   UTF-8 (supposé, Google n'est pas joignable d'ici), et l'octet `à`
+   était perdu. Corrigé dans `html::decode` : une page dite UTF-8 qui ne
+   l'est pas garde ses suites UTF-8 et lit chaque autre octet en
+   Windows-1252. La recherche Google demande JavaScript : celle de
+   l'accueil (DuckDuckGo HTML) marche sans.
+
+Nouveau holon : SHA-256 `5c908025…901f` (`docs/livraison-alpha-2.md`).
+
+### Reste à faire, par ordre d'effet sur ce que voit Stef
+1. Les images (PNG, JPEG, GIF) : Google et la plupart des sites.
+2. La grille CSS.
+3. Un chargement qui ne bloque pas la fenêtre (côté système).
+
 ## 2026-10-14 (midi) — Le holon accordé au système d'alpha-2
 
 Lu dans alpha-2 (en lecture seule) : #70 fusionnée (modules de 16 Mio,

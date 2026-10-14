@@ -178,7 +178,7 @@ pub fn marker_text(kind: ListStyle, n: i32) -> Option<String> {
 
 /// What a form control or other replaced element shows; `None` for an
 /// ordinary element.
-fn replaced(doc: &Document, node: NodeId) -> Option<Replaced> {
+pub(crate) fn replaced(doc: &Document, node: NodeId) -> Option<Replaced> {
     let e = doc.element(node)?;
     Some(match e.name.as_str() {
         "img" => Replaced::Image {

@@ -11,6 +11,7 @@ use crate::style;
 use crate::url::{self, Url};
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 /// What a form sends: the address to load (`GET`), or the address and the
 /// body (`POST`).
@@ -30,6 +31,19 @@ pub struct Page {
     /// The viewport the layout is for.
     size: (i32, i32),
     pub dark: bool,
+    /// Changes whenever what the page draws may have changed; never the
+    /// same for two pages (see [`Page::generation`]).
+    generation: u32,
+    /// The fields whose text changed in the layout without making it
+    /// again: (generation before, generation after, field), in order.
+    patches: Vec<(u32, u32, NodeId)>,
+}
+
+/// The last generation given to a page.
+static GENERATION: AtomicU32 = AtomicU32::new(0);
+
+fn fresh() -> u32 {
+    GENERATION.fetch_add(1, Ordering::Relaxed).wrapping_add(1)
 }
 
 fn is_stylesheet_link(doc: &Document, n: NodeId) -> bool {
@@ -63,15 +77,32 @@ impl Page {
         } else {
             html::parse(&text)
         };
-        let mut page = Page { url, doc, sheets: Vec::new(), layout: None, size: (0, 0), dark: false };
+        let mut page = Page {
+            url,
+            doc,
+            sheets: Vec::new(),
+            layout: None,
+            size: (0, 0),
+            dark: false,
+            generation: fresh(),
+            patches: Vec::new(),
+        };
         page.read_inline_sheets();
         page
     }
 
     /// A page from HTML text (the browser's own pages).
     pub fn from_html(url: Url, text: &str) -> Page {
-        let mut page =
-            Page { url, doc: html::parse(text), sheets: Vec::new(), layout: None, size: (0, 0), dark: false };
+        let mut page = Page {
+            url,
+            doc: html::parse(text),
+            sheets: Vec::new(),
+            layout: None,
+            size: (0, 0),
+            dark: false,
+            generation: fresh(),
+            patches: Vec::new(),
+        };
         page.read_inline_sheets();
         page
     }
@@ -120,7 +151,7 @@ impl Page {
     pub fn add_sheet(&mut self, node: NodeId, text: String, url: Url) {
         let at = self.sheets.iter().position(|(n, _, _)| *n > node).unwrap_or(self.sheets.len());
         self.sheets.insert(at, (node, text, url));
-        self.layout = None;
+        self.invalidate();
     }
 
     /// The `@import`s of the sheets read so far, resolved.
@@ -159,6 +190,8 @@ impl Page {
             };
             self.layout = Some(layout);
             self.size = (width, height);
+            self.generation = fresh();
+            self.patches.clear();
         }
         self.layout.as_ref().unwrap_or_else(|| unreachable!())
     }
@@ -166,6 +199,35 @@ impl Page {
     /// Forgets the layout (a form field changed, a sheet came).
     pub fn invalidate(&mut self) {
         self.layout = None;
+        self.generation = fresh();
+        self.patches.clear();
+    }
+
+    /// The fields typed in since `generation`, if nothing else changed
+    /// since (none if it is the current one); `None` if the page changed
+    /// otherwise, or is another page.
+    pub fn patched_since(&self, generation: u32) -> Option<Vec<NodeId>> {
+        let mut at = generation;
+        let mut nodes = Vec::new();
+        let start = self.patches.iter().position(|p| p.0 == generation);
+        if let Some(start) = start {
+            for &(before, after, node) in &self.patches[start..] {
+                if before != at {
+                    return None;
+                }
+                at = after;
+                nodes.push(node);
+            }
+        }
+        (at == self.generation).then_some(nodes)
+    }
+
+    /// What tells two drawings of the page apart: it changes whenever the
+    /// layout does, and differs from one page to another, so an image of
+    /// the page made under the same generation (and scroll, view and
+    /// overlay) is still right.
+    pub fn generation(&self) -> u32 {
+        self.generation
     }
 
     /// The nearest ancestor (or itself) of `node` that is an element named
@@ -329,7 +391,22 @@ impl Page {
         if let Some(e) = self.doc.element_mut(node) {
             e.value = Some(value);
         }
-        self.invalidate();
+        // A field keeps its size whatever it holds: its text changes in
+        // the layout, which is not made again for each letter typed.
+        let patched = match (layout::replaced(&self.doc, node), self.layout.as_mut()) {
+            (Some(r), Some(l)) => patch(&mut l.root, node, &r),
+            _ => false,
+        };
+        if patched {
+            let before = self.generation;
+            self.generation = fresh();
+            if self.patches.len() >= 64 {
+                self.patches.clear();
+            }
+            self.patches.push((before, self.generation, node));
+        } else {
+            self.invalidate();
+        }
     }
 
     /// What the form holding `node` sends when `node` submits it (or Entrée
@@ -500,6 +577,21 @@ fn unreachable_layout(_w: i32, _h: i32) -> Layout {
     unreachable!("the browser's sheet always gives <html> a box")
 }
 
+/// Gives the fragments of `node` its new content; whether there was one.
+fn patch(f: &mut layout::Frag, node: NodeId, to: &layout::Replaced) -> bool {
+    let mut found = false;
+    if f.node == Some(node)
+        && let FragKind::Replaced(r) = &mut f.kind
+    {
+        *r = to.clone();
+        found = true;
+    }
+    for c in &mut f.children {
+        found |= patch(c, node, to);
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -550,5 +642,36 @@ mod tests {
         assert_eq!(t.doc.text_content(t.doc.find("pre").unwrap()), "<b>pas du HTML</b>");
         let r = page("<meta http-equiv=refresh content='0; url=/ailleurs'>");
         assert_eq!(r.refresh().unwrap().to_string(), "https://exemple.fr/ailleurs");
+    }
+
+    #[test]
+    fn typing_keeps_the_layout() {
+        let mut p = page("<form><input name=q placeholder='Rechercher'></form>");
+        let input = p.doc.find("input").unwrap();
+        let before = p.generation();
+        p.set_field_value(input, String::from("âne"));
+        assert!(p.layout.is_some() && p.generation() != before);
+        fn text(f: &layout::Frag, node: NodeId) -> Option<layout::Replaced> {
+            if f.node == Some(node)
+                && let FragKind::Replaced(r) = &f.kind
+            {
+                return Some(r.clone());
+            }
+            f.children.iter().find_map(|c| text(c, node))
+        }
+        let shown = text(&p.layout.as_ref().unwrap().root, input);
+        assert_eq!(
+            shown,
+            Some(layout::Replaced::Field { text: String::from("âne"), placeholder: false, password: false })
+        );
+        assert_eq!(p.patched_since(before), Some(alloc::vec![input]));
+        assert_eq!(p.patched_since(p.generation()), Some(Vec::new()));
+        let mid = p.generation();
+        p.set_field_value(input, String::from("ânes"));
+        assert_eq!(p.patched_since(before), Some(alloc::vec![input, input]));
+        assert_eq!(p.patched_since(mid), Some(alloc::vec![input]));
+        p.invalidate();
+        assert_eq!(p.patched_since(mid), None);
+        assert_ne!(page("").generation(), page("").generation());
     }
 }

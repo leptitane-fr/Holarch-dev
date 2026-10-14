@@ -270,7 +270,7 @@ impl Canvas {
 // ---------------------------------------------------------------- page
 
 /// What the browser wants shown on the page beyond the page itself.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct Overlay {
     /// The form field being typed in, and where its caret is (in chars).
     pub focus: Option<(NodeId, usize)>,
@@ -284,7 +284,17 @@ pub struct Overlay {
 /// Draws a laid out page in `view` (a rectangle of the canvas), scrolled
 /// down by `scroll` pixels.
 pub fn paint(layout: &Layout, canvas: &mut Canvas, view: Rect, scroll: i32, overlay: &Overlay) {
-    let old = canvas.set_clip(view);
+    paint_part(layout, canvas, view, scroll, overlay, view);
+}
+
+/// Like [`paint`], touching only the pixels of `part` (canvas pixels):
+/// enough when only what is there changed, such as a field typed in.
+pub fn paint_part(layout: &Layout, canvas: &mut Canvas, view: Rect, scroll: i32, overlay: &Overlay, part: Rect) {
+    let clip = (view.0.max(part.0), view.1.max(part.1), view.2.min(part.2), view.3.min(part.3));
+    if clip.0 >= clip.2 || clip.1 >= clip.3 {
+        return;
+    }
+    let old = canvas.set_clip(clip);
     canvas.fill(view, layout.canvas);
     let dx = view.0;
     let dy = view.1 - scroll;

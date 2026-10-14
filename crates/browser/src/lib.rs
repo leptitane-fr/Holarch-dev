@@ -215,6 +215,19 @@ pub struct Browser {
     /// The person drags the scroll bar's thumb, grabbed this far below its
     /// top.
     dragging: Option<i32>,
+    /// The page as last painted, to draw again without painting it when
+    /// only the browser around it changed (a letter in the address bar,
+    /// the pointer over a button).
+    painted: Option<(Painted, Vec<u32>)>,
+}
+
+/// What a painted page depends on.
+#[derive(PartialEq, Eq)]
+struct Painted {
+    generation: u32,
+    view: (i32, i32, i32, i32),
+    scroll: i32,
+    overlay: Overlay,
 }
 
 impl Browser {
@@ -238,6 +251,7 @@ impl Browser {
             pointer: (-1, -1),
             left: false,
             dragging: None,
+            painted: None,
         };
         b.new_tab(None);
         b
@@ -1157,8 +1171,64 @@ impl Browser {
             found: (self.finding && !self.find.text.is_empty()).then(|| self.find.text.clone()),
         };
         let page = &mut self.tabs[self.current].page;
-        let layout = page.lay_out(w, h);
-        hln_web::paint::paint(layout, canvas, view, scroll, &overlay);
+        page.lay_out(w, h);
+        let page = &self.tabs[self.current].page;
+        let key = Painted { generation: page.generation(), view, scroll, overlay };
+        let (x0, y0, x1, y1) = (view.0.max(0), view.1.max(0), view.2.min(canvas.width), view.3.min(canvas.height));
+        let (row, rows) = ((x1 - x0).max(0) as usize, (y1 - y0).max(0) as usize);
+        let stride = canvas.width as usize;
+        let at = |y: usize| (y0 as usize + y) * stride + x0 as usize;
+        // What changed since the page was last painted: nothing, a few
+        // fields (typed in, or the caret moved), or anything.
+        let part = match &self.painted {
+            Some((k, pixels)) if k.view == key.view && k.scroll == key.scroll && pixels.len() == row * rows => {
+                let fields = if k.overlay.found == key.overlay.found && k.overlay.ring == key.overlay.ring {
+                    page.patched_since(k.generation)
+                } else {
+                    None
+                };
+                fields.and_then(|mut nodes| {
+                    nodes.extend(k.overlay.focus.iter().chain(key.overlay.focus.iter()).map(|f| f.0));
+                    if k.overlay.focus != key.overlay.focus && nodes.is_empty() {
+                        return None;
+                    }
+                    let mut part = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+                    for n in nodes {
+                        let (x, y, w, h) = page.rect_of(n)?;
+                        let (x, y) = (view.0 + x, view.1 + y - scroll);
+                        // The caret and the field's ring reach a little out.
+                        part = (part.0.min(x - 4), part.1.min(y - 4), part.2.max(x + w + 4), part.3.max(y + h + 4));
+                    }
+                    Some(part)
+                })
+            }
+            _ => None,
+        };
+        match (part, &mut self.painted, &page.layout) {
+            (Some(part), Some((k, pixels)), Some(layout)) => {
+                for y in 0..rows {
+                    canvas.pixels[at(y)..at(y) + row].copy_from_slice(&pixels[y * row..(y + 1) * row]);
+                }
+                if part.0 < part.2 {
+                    hln_web::paint::paint_part(layout, canvas, view, scroll, &key.overlay, part);
+                    let (top, bottom) = ((part.1 - y0).max(0) as usize, ((part.3 - y0).max(0) as usize).min(rows));
+                    for y in top..bottom {
+                        pixels[y * row..(y + 1) * row].copy_from_slice(&canvas.pixels[at(y)..at(y) + row]);
+                    }
+                }
+                *k = key;
+            }
+            _ => {
+                if let Some(layout) = &page.layout {
+                    hln_web::paint::paint(layout, canvas, view, scroll, &key.overlay);
+                }
+                let mut pixels = Vec::with_capacity(row * rows);
+                for y in 0..rows {
+                    pixels.extend_from_slice(&canvas.pixels[at(y)..at(y) + row]);
+                }
+                self.painted = Some((key, pixels));
+            }
+        }
         chrome::draw(self, canvas);
     }
 
@@ -1353,5 +1423,25 @@ mod tests {
         assert_eq!(b.tabs.len(), 2);
         b.draw(&mut canvas);
         assert_eq!(b.tabs[0].title().to_string(), "A");
+    }
+
+    #[test]
+    fn typing_draws_like_a_full_paint() {
+        let mut b = Browser::new(800, 600);
+        let mut canvas = Canvas::new(800, 600);
+        b.draw(&mut canvas);
+        let input = b.tab().page.doc.find("input").unwrap();
+        b.focus_field(input);
+        b.draw(&mut canvas);
+        for c in "Le P'tit Âne".chars() {
+            b.handle(Event::Key(Key::Char(c), Mods::NONE));
+            b.draw(&mut canvas);
+        }
+        b.handle(Event::Key(Key::Left, Mods::NONE));
+        b.draw(&mut canvas);
+        b.painted = None;
+        let mut full = Canvas::new(800, 600);
+        b.draw(&mut full);
+        assert!(canvas.pixels == full.pixels);
     }
 }
