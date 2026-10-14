@@ -1,0 +1,26 @@
+[package]
+name = "hln-navigateur"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The web browser as a holon: WebAssembly for the system's interpreter
+# (wasm32-unknown-unknown, integers only), the browser of `hln-browser`
+# in its window. Without the `network` feature it imports only what the
+# system gives today (`hln.log`, `hln.present`, `hln.input`) and its pages
+# say honestly that the network is not there yet; with it, it also imports
+# `hln.fetch`, proposed to the system side.
+[lib]
+crate-type = ["cdylib"]
+test = false
+bench = false
+
+[features]
+network = []
+
+[dependencies]
+hln-browser = { path = "../../crates/browser" }
+hln-web = { path = "../../crates/web" }
+
+[lints]
+workspace = true

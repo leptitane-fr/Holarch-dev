@@ -1,0 +1,41 @@
+# On every push: format, lints (host and the holon's WebAssembly), unit
+# tests, then the bench: the holon is built and checked as the system
+# checks it (imports, no floating point), and the browser draws its own
+# pages into PNG images, kept as an artifact. Rust comes from
+# rust-toolchain.toml.
+name: Check
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust (version from rust-toolchain.toml)
+        run: rustup toolchain install
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Lints (host, holon)
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo clippy -p hln-navigateur --target wasm32-unknown-unknown -- -D warnings
+          cargo clippy -p hln-navigateur --features network --target wasm32-unknown-unknown -- -D warnings
+
+      - name: Unit tests
+        run: cargo test
+
+      - name: Bench
+        run: cargo xtask test
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: navigateur
+          path: |
+            build/holon/*.wasm
+            build/bench.png

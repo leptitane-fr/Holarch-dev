@@ -1,0 +1,14 @@
+[package]
+name = "hln-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The browser's engine, written from scratch: addresses, HTML, CSS, the
+# layout of a page and its drawing. No floating point anywhere: the
+# system's WebAssembly interpreter runs integers only.
+[dependencies]
+hln-type = { path = "../type" }
+
+[lints]
+workspace = true

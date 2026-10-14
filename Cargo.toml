@@ -1,0 +1,23 @@
+[workspace]
+resolver = "3"
+members = ["crates/browser", "crates/type", "crates/web", "holons/navigateur", "xtask"]
+default-members = ["crates/browser", "crates/type", "crates/web", "xtask"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "LicenseRef-Proprietary"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[profile.dev]
+panic = "abort"
+# The engine is exercised by the bench on real pages: unoptimized, it is
+# too slow to be pleasant.
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
