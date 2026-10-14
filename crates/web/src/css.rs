@@ -90,9 +90,7 @@ impl Lexer<'_> {
 
     fn starts_ident(&mut self, at: usize) -> bool {
         match self.peek_n(at) {
-            Some('-') => {
-                self.peek_n(at + 1).is_some_and(|c| is_name_start(c) || c == '-') || self.valid_escape(at + 1)
-            }
+            Some('-') => self.peek_n(at + 1).is_some_and(|c| is_name_start(c) || c == '-') || self.valid_escape(at + 1),
             Some(c) if is_name_start(c) => true,
             Some('\\') => self.valid_escape(at),
             _ => false,
@@ -547,11 +545,8 @@ fn rules(toks: &[Tok], media: &Media, sheet: &mut Sheet, top: bool) {
                             Tok::Url(u) | Tok::Str(u) => Some(u.clone()),
                             _ => None,
                         });
-                        let rest: Vec<Tok> = prelude
-                            .iter()
-                            .filter(|t| !matches!(t, Tok::Url(_) | Tok::Str(_)))
-                            .cloned()
-                            .collect();
+                        let rest: Vec<Tok> =
+                            prelude.iter().filter(|t| !matches!(t, Tok::Url(_) | Tok::Str(_))).cloned().collect();
                         if let Some(url) = url
                             && media_matches(&rest, media)
                         {
@@ -566,10 +561,8 @@ fn rules(toks: &[Tok], media: &Media, sheet: &mut Sheet, top: bool) {
                 match name.as_str() {
                     "media" if media_matches(prelude, media) => rules(body, media, sheet, false),
                     "supports" if supports(prelude) => rules(body, media, sheet, false),
-                    "layer" | "document" | "-moz-document" | "scope" | "starting-style" => {
-                        if name == "layer" {
-                            rules(body, media, sheet, false)
-                        }
+                    "layer" | "document" | "-moz-document" | "scope" | "starting-style" if name == "layer" => {
+                        rules(body, media, sheet, false)
                     }
                     _ => {}
                 }
@@ -638,7 +631,12 @@ pub enum Pseudo {
     OnlyChild,
     /// `an+b`, counted from the start or the end, among all elements or
     /// those of the same type.
-    Nth { a: i32, b: i32, from_end: bool, of_type: bool },
+    Nth {
+        a: i32,
+        b: i32,
+        from_end: bool,
+        of_type: bool,
+    },
     Root,
     Empty,
     Link,
@@ -983,10 +981,8 @@ fn attr_matches(doc: &Document, node: NodeId, sel: &AttrSel) -> bool {
 fn position(doc: &Document, node: NodeId, from_end: bool, of_type: bool) -> i32 {
     let Some(parent) = doc.parent(node) else { return 1 };
     let name = doc.element(node).map(|e| e.name.as_str()).unwrap_or("");
-    let mut siblings: Vec<NodeId> = doc
-        .element_children(parent)
-        .filter(|&c| !of_type || doc.element(c).is_some_and(|e| e.name == name))
-        .collect();
+    let mut siblings: Vec<NodeId> =
+        doc.element_children(parent).filter(|&c| !of_type || doc.element(c).is_some_and(|e| e.name == name)).collect();
     if from_end {
         siblings.reverse();
     }

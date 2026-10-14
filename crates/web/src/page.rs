@@ -70,7 +70,8 @@ impl Page {
 
     /// A page from HTML text (the browser's own pages).
     pub fn from_html(url: Url, text: &str) -> Page {
-        let mut page = Page { url, doc: html::parse(text), sheets: Vec::new(), layout: None, size: (0, 0), dark: false };
+        let mut page =
+            Page { url, doc: html::parse(text), sheets: Vec::new(), layout: None, size: (0, 0), dark: false };
         page.read_inline_sheets();
         page
     }
@@ -282,7 +283,9 @@ impl Page {
     pub fn is_submit(&self, node: NodeId) -> bool {
         self.doc.element(node).is_some_and(|e| match e.name.as_str() {
             "button" => e.attr("type").is_none_or(|t| t.eq_ignore_ascii_case("submit")),
-            "input" => e.attr("type").is_some_and(|t| t.eq_ignore_ascii_case("submit") || t.eq_ignore_ascii_case("image")),
+            "input" => {
+                e.attr("type").is_some_and(|t| t.eq_ignore_ascii_case("submit") || t.eq_ignore_ascii_case("image"))
+            }
             _ => false,
         })
     }
@@ -510,7 +513,9 @@ mod tests {
 
     #[test]
     fn links_and_anchors() {
-        let p = page("<p style='margin:0'><a href='autre.html#x'>lien</a></p><div style='height:900px'></div><h2 id=bas>Bas</h2>");
+        let p = page(
+            "<p style='margin:0'><a href='autre.html#x'>lien</a></p><div style='height:900px'></div><h2 id=bas>Bas</h2>",
+        );
         let node = p.node_at(10, 8).unwrap();
         let (_, url) = p.link_of(node).unwrap();
         assert_eq!(url.to_string(), "https://exemple.fr/dossier/autre.html#x");
@@ -529,16 +534,15 @@ mod tests {
         let q = p.doc.find("input").unwrap();
         p.set_field_value(q, String::from("le p'tit âne"));
         let s = p.submit(button).unwrap();
-        assert_eq!(
-            s.url.to_string(),
-            "https://exemple.fr/cherche?q=le+p%27tit+%C3%A2ne&l=fr&c=on&s=Deux&go=1"
-        );
+        assert_eq!(s.url.to_string(), "https://exemple.fr/cherche?q=le+p%27tit+%C3%A2ne&l=fr&c=on&s=Deux&go=1");
         assert!(p.is_text_field(q) && p.is_submit(button));
     }
 
     #[test]
     fn stylesheets_and_text_pages() {
-        let p = page("<base href='https://cdn.exemple.fr/'><link rel=stylesheet href=a.css><link rel='alternate stylesheet' href=b.css>");
+        let p = page(
+            "<base href='https://cdn.exemple.fr/'><link rel=stylesheet href=a.css><link rel='alternate stylesheet' href=b.css>",
+        );
         let links = p.stylesheet_links();
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].1.to_string(), "https://cdn.exemple.fr/a.css");

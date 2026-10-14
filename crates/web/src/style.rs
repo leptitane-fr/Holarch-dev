@@ -519,7 +519,11 @@ pub fn length(part: &[Tok], u: &Units) -> Option<Length> {
                     if values.iter().any(|v| v.has_pct()) {
                         return values.first().copied();
                     }
-                    let pick = if f == "min" { values.iter().min_by_key(|v| v.milli) } else { values.iter().max_by_key(|v| v.milli) };
+                    let pick = if f == "min" {
+                        values.iter().min_by_key(|v| v.milli)
+                    } else {
+                        values.iter().max_by_key(|v| v.milli)
+                    };
                     pick.copied()
                 }
                 "clamp" => {
@@ -837,8 +841,10 @@ pub fn color(part: &[Tok]) -> Option<Color> {
             Some(Color(a << 24 | r << 16 | g << 8 | bl))
         }
         [Tok::Function(f), ..] => {
-            let inner: Vec<&Tok> =
-                part[1..part.len() - 1].iter().filter(|t| !matches!(t, Tok::Ws | Tok::Comma | Tok::Delim('/'))).collect();
+            let inner: Vec<&Tok> = part[1..part.len() - 1]
+                .iter()
+                .filter(|t| !matches!(t, Tok::Ws | Tok::Comma | Tok::Delim('/')))
+                .collect();
             match f.as_str() {
                 "rgb" | "rgba" => {
                     let (r, g, b) = (channel(inner.first()?)?, channel(inner.get(1)?)?, channel(inner.get(2)?)?);
@@ -1024,7 +1030,11 @@ fn hints(doc: &Document, node: NodeId) -> Vec<Decl> {
         if digits.is_empty() {
             return None;
         }
-        Some(if v[digits.len()..].starts_with('%') { alloc::format!("{digits}%") } else { alloc::format!("{digits}px") })
+        Some(if v[digits.len()..].starts_with('%') {
+            alloc::format!("{digits}%")
+        } else {
+            alloc::format!("{digits}px")
+        })
     };
     if let Some(c) = e.attr("bgcolor") {
         push("background-color", &legacy_color(c));
@@ -1035,8 +1045,22 @@ fn hints(doc: &Document, node: NodeId) -> Vec<Decl> {
     if let Some(c) = e.attr("text").filter(|_| e.name == "body") {
         push("color", &legacy_color(c));
     }
-    if matches!(e.name.as_str(), "img" | "table" | "td" | "th" | "col" | "iframe" | "video" | "canvas" | "svg" | "hr" | "object" | "embed" | "input")
-    {
+    if matches!(
+        e.name.as_str(),
+        "img"
+            | "table"
+            | "td"
+            | "th"
+            | "col"
+            | "iframe"
+            | "video"
+            | "canvas"
+            | "svg"
+            | "hr"
+            | "object"
+            | "embed"
+            | "input"
+    ) {
         if let Some(w) = e.attr("width").and_then(dim) {
             push("width", &w);
         }
@@ -1121,7 +1145,8 @@ fn hints(doc: &Document, node: NodeId) -> Vec<Decl> {
         push("list-style-type", kind);
     }
     if e.name == "body" {
-        for (attr, prop) in [("leftmargin", "margin-left"), ("topmargin", "margin-top"), ("marginwidth", "margin-left")] {
+        for (attr, prop) in [("leftmargin", "margin-left"), ("topmargin", "margin-top"), ("marginwidth", "margin-left")]
+        {
             if let Some(v) = e.attr(attr).and_then(dim) {
                 push(prop, &v);
             }
@@ -1205,9 +1230,11 @@ fn fixup(s: &mut Style, parent: &Style, doc: &Document, node: NodeId, pseudo: bo
     // Floated and absolutely positioned boxes are blocks.
     if s.float != Float::None || matches!(s.position, Position::Absolute | Position::Fixed) {
         s.display = match s.display {
-            Display::Inline | Display::InlineBlock | Display::TableCell | Display::TableRow | Display::TableRowGroup => {
-                Display::Block
-            }
+            Display::Inline
+            | Display::InlineBlock
+            | Display::TableCell
+            | Display::TableRow
+            | Display::TableRowGroup => Display::Block,
             Display::InlineTable => Display::Table,
             Display::InlineFlex => Display::Flex,
             d => d,
@@ -1426,8 +1453,17 @@ fn apply(s: &mut Style, parent: &Style, name: &str, value: &[Tok], u: &Units) {
             "unset" | "revert" | "revert-layer" => {
                 if matches!(
                     name,
-                    "color" | "font-size" | "font-weight" | "font-style" | "font-family" | "line-height" | "text-align"
-                        | "text-transform" | "white-space" | "visibility" | "list-style-type"
+                    "color"
+                        | "font-size"
+                        | "font-weight"
+                        | "font-style"
+                        | "font-family"
+                        | "line-height"
+                        | "text-align"
+                        | "text-transform"
+                        | "white-space"
+                        | "visibility"
+                        | "list-style-type"
                 ) {
                     Some(parent)
                 } else {
@@ -1583,8 +1619,7 @@ fn apply(s: &mut Style, parent: &Style, name: &str, value: &[Tok], u: &Units) {
                                 i += 2;
                             }
                             font_family(s, &value[value.len().min(1)..]);
-                            let rest: Vec<Tok> =
-                                ps[i + 1..].iter().flat_map(|p| p.iter().cloned()).collect();
+                            let rest: Vec<Tok> = ps[i + 1..].iter().flat_map(|p| p.iter().cloned()).collect();
                             font_family(s, &rest);
                             return;
                         }
@@ -1631,9 +1666,7 @@ fn apply(s: &mut Style, parent: &Style, name: &str, value: &[Tok], u: &Units) {
         "white-space" | "white-space-collapse" | "text-wrap" | "text-wrap-mode" => {
             s.white_space = match word.as_deref() {
                 Some("normal") | Some("wrap") | Some("collapse") => {
-                    if name == "white-space-collapse" || name == "white-space" {
-                        WhiteSpace::Normal
-                    } else if s.white_space == WhiteSpace::NoWrap {
+                    if name == "white-space-collapse" || name == "white-space" || s.white_space == WhiteSpace::NoWrap {
                         WhiteSpace::Normal
                     } else {
                         s.white_space
@@ -1719,11 +1752,14 @@ fn apply(s: &mut Style, parent: &Style, name: &str, value: &[Tok], u: &Units) {
             }
         }
         "box-sizing" => s.border_box = word.as_deref() == Some("border-box"),
-        "width" | "height" | "min-width" | "min-height" | "max-width" | "max-height" | "inline-size"
-        | "block-size" | "min-inline-size" | "max-inline-size" | "min-block-size" | "max-block-size" => {
+        "width" | "height" | "min-width" | "min-height" | "max-width" | "max-height" | "inline-size" | "block-size"
+        | "min-inline-size" | "max-inline-size" | "min-block-size" | "max-block-size" => {
             let l = match word.as_deref() {
                 Some("none") => Length::AUTO,
-                Some("fit-content") | Some("max-content") | Some("min-content") | Some("-webkit-fill-available")
+                Some("fit-content")
+                | Some("max-content")
+                | Some("min-content")
+                | Some("-webkit-fill-available")
                 | Some("stretch") => Length::AUTO,
                 _ => match len(0) {
                     Some(l) => l,
@@ -1751,9 +1787,9 @@ fn apply(s: &mut Style, parent: &Style, name: &str, value: &[Tok], u: &Units) {
             }
         }
         "overflow" | "overflow-x" | "overflow-y" => {
-            s.overflow_hidden = ps.iter().any(|p| {
-                matches!(ident(p).as_deref(), Some("hidden") | Some("clip") | Some("auto") | Some("scroll"))
-            })
+            s.overflow_hidden = ps
+                .iter()
+                .any(|p| matches!(ident(p).as_deref(), Some("hidden") | Some("clip") | Some("auto") | Some("scroll")))
         }
         "opacity" => {
             s.opacity = match ps[0] {
@@ -1885,13 +1921,15 @@ fn apply(s: &mut Style, parent: &Style, name: &str, value: &[Tok], u: &Units) {
         _ => {
             // border-top, border-left-width, border-bottom-color...
             if let Some(rest) = name.strip_prefix("border-") {
-                let side = |w: &str| SIDES.iter().position(|x| *x == w).or(match w {
-                    "block-start" => Some(0),
-                    "inline-end" => Some(1),
-                    "block-end" => Some(2),
-                    "inline-start" => Some(3),
-                    _ => None,
-                });
+                let side = |w: &str| {
+                    SIDES.iter().position(|x| *x == w).or(match w {
+                        "block-start" => Some(0),
+                        "inline-end" => Some(1),
+                        "block-end" => Some(2),
+                        "inline-start" => Some(3),
+                        _ => None,
+                    })
+                };
                 if let Some(i) = side(rest) {
                     border_shorthand(s, &[i], &ps, u);
                 } else if let Some((which, what)) = rest.rsplit_once('-')
@@ -1911,12 +1949,11 @@ fn apply(s: &mut Style, parent: &Style, name: &str, value: &[Tok], u: &Units) {
                         "color" => s.border_color[i] = color(ps[0]),
                         _ => {}
                     }
-                } else if rest.ends_with("radius") {
-                    if s.radius == 0
-                        && let Some(l) = len(0)
-                    {
-                        s.radius = l.resolve(0).unwrap_or(0).clamp(0, 10_000) / 2;
-                    }
+                } else if rest.ends_with("radius")
+                    && s.radius == 0
+                    && let Some(l) = len(0)
+                {
+                    s.radius = l.resolve(0).unwrap_or(0).clamp(0, 10_000) / 2;
                 }
                 return;
             }
@@ -2109,7 +2146,10 @@ mod tests {
         assert_eq!(s.background, Color::rgb(255, 0, 0));
         assert_eq!(s.width.pct, 50_000);
         assert_eq!(s.border(0), 1);
-        let p = style_of("<style>@media (max-width:600px){p{color:red}} @media (min-width:600px){p{color:lime}}</style><p>x", "p");
+        let p = style_of(
+            "<style>@media (max-width:600px){p{color:red}} @media (min-width:600px){p{color:lime}}</style><p>x",
+            "p",
+        );
         assert_eq!(p.color, Color::rgb(0, 255, 0));
         let hidden = style_of("<p hidden>x</p>", "p");
         assert_eq!(hidden.display, Display::None);

@@ -9,6 +9,7 @@ publish = false
 # to PNG, the holon's build and checks. Runs on the developer's machine
 # only, so it may use crates the holon never does.
 [dependencies]
+hln-browser = { path = "../crates/browser" }
 hln-web = { path = "../crates/web" }
 
 

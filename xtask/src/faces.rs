@@ -32,8 +32,7 @@ pub fn generate(args: &[String]) -> Result {
                 .into(),
         );
     };
-    let mut wanted: Vec<char> =
-        (' '..='~').chain('\u{a0}'..='\u{17f}').chain(EXTRA.chars()).collect::<Vec<_>>();
+    let mut wanted: Vec<char> = (' '..='~').chain('\u{a0}'..='\u{17f}').chain(EXTRA.chars()).collect::<Vec<_>>();
     wanted.sort_unstable();
     wanted.dedup();
     let dir = root().join("crates/type/src/faces");

@@ -1,5 +1,6 @@
 //! The development tasks (see `cargo xtask help`).
 
+mod bench;
 mod faces;
 mod page;
 mod png;
@@ -17,9 +18,10 @@ pub fn root() -> PathBuf {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
+        Some("bench") => bench::run(&args[1..]),
         Some("faces") => faces::generate(&args[1..]),
         Some("page") => page::run(&args[1..]),
-        _ => Err("usage: cargo xtask <faces … | page …>".into()),
+        _ => Err("usage: cargo xtask <bench … | faces … | page …>".into()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

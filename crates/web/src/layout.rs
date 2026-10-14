@@ -25,10 +25,20 @@ use hln_type::Face;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Replaced {
     /// An image: its address and its text alternative.
-    Image { src: String, alt: String },
+    Image {
+        src: String,
+        alt: String,
+    },
     /// A text field: its text, or its placeholder (shown grey) when empty.
-    Field { text: String, placeholder: bool, password: bool },
-    Check { checked: bool, radio: bool },
+    Field {
+        text: String,
+        placeholder: bool,
+        password: bool,
+    },
+    Check {
+        checked: bool,
+        radio: bool,
+    },
     /// A button drawn by the browser (`<input type=submit>`).
     Button(String),
     Select(String),
@@ -180,13 +190,13 @@ fn replaced(doc: &Document, node: NodeId) -> Option<Replaced> {
             match kind.as_str() {
                 "checkbox" => Replaced::Check { checked: e.checked, radio: false },
                 "radio" => Replaced::Check { checked: e.checked, radio: true },
-                "submit" | "button" | "reset" | "image" => Replaced::Button(String::from(
-                    e.attr("value").unwrap_or(match kind.as_str() {
+                "submit" | "button" | "reset" | "image" => {
+                    Replaced::Button(String::from(e.attr("value").unwrap_or(match kind.as_str() {
                         "reset" => "Réinitialiser",
                         "submit" | "image" => "Envoyer",
                         _ => "",
-                    }),
-                )),
+                    })))
+                }
                 "range" | "color" | "file" => Replaced::Embedded(kind),
                 _ => {
                     let value = e.current_value();
@@ -207,8 +217,7 @@ fn replaced(doc: &Document, node: NodeId) -> Option<Replaced> {
             None => doc.text_content(node),
         }),
         "select" => {
-            let options: Vec<NodeId> =
-                doc.descendants(node).into_iter().filter(|&n| doc.is(n, "option")).collect();
+            let options: Vec<NodeId> = doc.descendants(node).into_iter().filter(|&n| doc.is(n, "option")).collect();
             let chosen = options
                 .iter()
                 .copied()
@@ -297,7 +306,7 @@ impl Builder<'_> {
                     b.span = (num("colspan").clamp(1, 1000), num("rowspan").clamp(1, 65534));
                 }
                 if style.display == Display::ListItem {
-                    b.marker = self.marker(node, &style);
+                    b.marker = self.marker(node, style);
                 }
                 if let Some(before) = self.styles.before.get(&node) {
                     b.children.push(self.pseudo(node, before, deco));
@@ -518,10 +527,17 @@ pub enum FragKind {
     /// A box: its background and borders.
     Box,
     /// A run of text on one line; `baseline` from the fragment's top.
-    Text { text: String, baseline: i32, decoration: (u8, Color) },
+    Text {
+        text: String,
+        baseline: i32,
+        decoration: (u8, Color),
+    },
     Replaced(Replaced),
     /// A list marker drawn as a shape (disc, circle, square) or text.
-    Marker { text: String, baseline: i32 },
+    Marker {
+        text: String,
+        baseline: i32,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -722,13 +738,31 @@ fn transform(text: &str, t: Transform, at_word_start: &mut bool) -> String {
 enum Piece<'a> {
     /// A word (or a run of kept spaces); `space`: a collapsible space
     /// follows it, where the line may break.
-    Word { text: String, width: i32, space: i32, style: &'a Rc<Style>, node: Option<NodeId>, deco: (u8, Color) },
+    Word {
+        text: String,
+        width: i32,
+        space: i32,
+        style: &'a Rc<Style>,
+        node: Option<NodeId>,
+        deco: (u8, Color),
+    },
     /// An inline box opens: its left edge's width (margin, border, padding).
-    Open { b: &'a LayoutBox, edge: i32 },
-    Close { b: &'a LayoutBox, edge: i32 },
+    Open {
+        b: &'a LayoutBox,
+        edge: i32,
+    },
+    Close {
+        b: &'a LayoutBox,
+        edge: i32,
+    },
     /// An inline-level block or replaced element, laid out already.
     /// `space`: a collapsible space follows it.
-    Atomic { frag: Box<Frag>, baseline: i32, margin: (i32, i32, i32, i32), space: i32 },
+    Atomic {
+        frag: Box<Frag>,
+        baseline: i32,
+        margin: (i32, i32, i32, i32),
+        space: i32,
+    },
     /// A forced line break.
     Break,
     /// An out-of-flow box met in the text: placed when its line is.
@@ -1021,6 +1055,7 @@ fn inline_widths(boxes: &[LayoutBox], ctx: &mut Ctx) -> (i32, i32) {
 /// Lays out a block-level box whose margin box starts at (`x`, `y`) in a
 /// containing block `cb_w` wide (and `cb_h` high, if known); `width`: a
 /// width imposed by the parent (flex items, cells), border box.
+#[allow(clippy::too_many_arguments)]
 fn block(
     b: &LayoutBox,
     x: i32,
@@ -1109,12 +1144,10 @@ fn block(
         }
     };
     let mut h = content_h.unwrap_or(inner_h);
-    if let Some(min) = s.min_height.resolve(cb_h.unwrap_or(0)).filter(|_| !s.min_height.has_pct() || cb_h.is_some())
-    {
+    if let Some(min) = s.min_height.resolve(cb_h.unwrap_or(0)).filter(|_| !s.min_height.has_pct() || cb_h.is_some()) {
         h = h.max(if s.border_box { min - e.v_inner() } else { min });
     }
-    if let Some(max) = s.max_height.resolve(cb_h.unwrap_or(0)).filter(|_| !s.max_height.has_pct() || cb_h.is_some())
-    {
+    if let Some(max) = s.max_height.resolve(cb_h.unwrap_or(0)).filter(|_| !s.max_height.has_pct() || cb_h.is_some()) {
         h = h.min(if s.border_box { max - e.v_inner() } else { max });
     }
     // A new formatting context grows to hold its floats.
@@ -1129,11 +1162,8 @@ fn block(
         let base = baseline.unwrap_or(line_metrics(s).0);
         let face = face_of(s);
         let mw = face.width(marker);
-        let (mx, text) = if s.list_inside {
-            (cx, marker.clone())
-        } else {
-            (cx - mw - face.size / 2 - 2, marker.clone())
-        };
+        let (mx, text) =
+            if s.list_inside { (cx, marker.clone()) } else { (cx - mw - face.size / 2 - 2, marker.clone()) };
         frag.children.insert(
             0,
             Frag {
@@ -1155,7 +1185,10 @@ fn block(
     }
     if s.position == Position::Relative {
         let dx = s.inset[3].resolve(cb_w).or_else(|| s.inset[1].resolve(cb_w).map(|v| -v)).unwrap_or(0);
-        let dy = s.inset[0].resolve(cb_h.unwrap_or(0)).or_else(|| s.inset[2].resolve(cb_h.unwrap_or(0)).map(|v| -v)).unwrap_or(0);
+        let dy = s.inset[0]
+            .resolve(cb_h.unwrap_or(0))
+            .or_else(|| s.inset[2].resolve(cb_h.unwrap_or(0)).map(|v| -v))
+            .unwrap_or(0);
         frag.translate(dx, dy);
         frag.positioned = true;
     }
@@ -1480,10 +1513,13 @@ fn lines(
         // Heights: the strut, then each piece's.
         let mut above = strut_above;
         let mut below = strut_below;
-        let mut stack_style: Vec<&Rc<Style>> = open.iter().map(|&o| match &pieces[o] {
-            Piece::Open { b, .. } => &b.style,
-            _ => &owner.style,
-        }).collect();
+        let mut stack_style: Vec<&Rc<Style>> = open
+            .iter()
+            .map(|&o| match &pieces[o] {
+                Piece::Open { b, .. } => &b.style,
+                _ => &owner.style,
+            })
+            .collect();
         for p in &placed {
             match &pieces[p.index] {
                 Piece::Word { style, .. } => {
@@ -1551,12 +1587,14 @@ fn lines(
         let mut boxes_open: Vec<(usize, i32)> = open.iter().map(|&o| (o, x0)).collect();
         let mut texts: Vec<Frag> = Vec::new();
         let mut spaces_seen = 0;
-        let mut run: Option<(i32, String, &Rc<Style>, Option<NodeId>, (u8, Color), i32)> = None;
-        let flush_run = |run: &mut Option<(i32, String, &Rc<Style>, Option<NodeId>, (u8, Color), i32)>,
-                         texts: &mut Vec<Frag>| {
+        // A run of text being gathered: where, what, its style, node,
+        // decoration and width.
+        type Run<'s> = Option<(i32, String, &'s Rc<Style>, Option<NodeId>, (u8, Color), i32)>;
+        let mut run: Run = None;
+        let flush_run = |run: &mut Run, texts: &mut Vec<Frag>| {
             if let Some((rx, text, style, node, deco, rw)) = run.take() {
                 let text = text.trim_end_matches(' ');
-                let text = if style.white_space.keeps_spaces() { String::from(text) } else { String::from(text) };
+                let text = String::from(text);
                 if text.is_empty() {
                     return;
                 }
@@ -1588,12 +1626,14 @@ fn lines(
                         flush_run(&mut run, &mut texts);
                         run = Some((px, String::new(), style, *node, *deco, 0));
                     }
-                    if let Some(r) = run.as_mut() {
-                        if per_space > 0 && !r.1.is_empty() && r.1.ends_with(' ') {
-                            // Justified: each word on its own.
-                            flush_run(&mut run, &mut texts);
-                            run = Some((px, String::new(), style, *node, *deco, 0));
-                        }
+                    if let Some(r) = run.as_mut()
+                        && per_space > 0
+                        && !r.1.is_empty()
+                        && r.1.ends_with(' ')
+                    {
+                        // Justified: each word on its own.
+                        flush_run(&mut run, &mut texts);
+                        run = Some((px, String::new(), style, *node, *deco, 0));
                     }
                     if let Some(r) = run.as_mut() {
                         r.1.push_str(text);
@@ -1613,7 +1653,9 @@ fn lines(
                 }
                 Piece::Close { b, edge } => {
                     flush_run(&mut run, &mut texts);
-                    if let Some(at) = boxes_open.iter().rposition(|(o, _)| matches!(&pieces[*o], Piece::Open { b: ob, .. } if core::ptr::eq(*ob, *b)))
+                    if let Some(at) = boxes_open
+                        .iter()
+                        .rposition(|(o, _)| matches!(&pieces[*o], Piece::Open { b: ob, .. } if core::ptr::eq(*ob, *b)))
                     {
                         let (o, start_x) = boxes_open.remove(at);
                         let first_part = placed.iter().any(|q| q.index == o);
@@ -1625,7 +1667,9 @@ fn lines(
                     let mut f = (**f).clone();
                     let ax = (px + 8) / 16 + margin.3;
                     let ay = match f.style.vertical_align {
-                        VAlign::Middle => baseline - face_of(s).ascent * 2 / 5 - (f.h + margin.0 + margin.2) / 2 + margin.0,
+                        VAlign::Middle => {
+                            baseline - face_of(s).ascent * 2 / 5 - (f.h + margin.0 + margin.2) / 2 + margin.0
+                        }
                         VAlign::Top => y + margin.0,
                         VAlign::Bottom => y + line_h - f.h - margin.2,
                         _ => baseline - fb + margin.0,
@@ -1886,7 +1930,8 @@ fn table(b: &LayoutBox, cx: i32, cy: i32, cw: i32, frag: &mut Frag, ctx: &mut Ct
         if fixed_width && sum_max > 0 {
             // Spread what is left in proportion to the widest contents.
             let extra = avail - sum_max;
-            let mut w: Vec<i32> = maxs.iter().map(|&m| m + (i64::from(extra) * i64::from(m) / i64::from(sum_max)) as i32).collect();
+            let mut w: Vec<i32> =
+                maxs.iter().map(|&m| m + (i64::from(extra) * i64::from(m) / i64::from(sum_max)) as i32).collect();
             let left = avail - w.iter().sum::<i32>();
             if let Some(last) = w.last_mut() {
                 *last += left;
@@ -2090,7 +2135,8 @@ fn flex(
         }
         // Grow or shrink the line's items.
         for _round in 0..4 {
-            let total: i32 = list[a..z].iter().map(|it| it.w + it.margins).sum::<i32>() + gap * (z - a).saturating_sub(1) as i32;
+            let total: i32 =
+                list[a..z].iter().map(|it| it.w + it.margins).sum::<i32>() + gap * (z - a).saturating_sub(1) as i32;
             let free = cw - total;
             if free > 0 {
                 let grow: i64 = list[a..z].iter().filter(|it| it.w < it.max).map(|it| i64::from(it.b.style.grow)).sum();
@@ -2351,7 +2397,8 @@ mod tests {
 
     #[test]
     fn blocks_stack_and_margins_collapse() {
-        let (l, doc) = lay("<style>body{margin:0} div{height:50px;margin:20px 0}</style><div id=a></div><div id=b></div>", 400);
+        let (l, doc) =
+            lay("<style>body{margin:0} div{height:50px;margin:20px 0}</style><div id=a></div><div id=b></div>", 400);
         let divs: Vec<&Frag> = {
             fn all<'a>(f: &'a Frag, doc: &Document, out: &mut Vec<&'a Frag>) {
                 if f.node.is_some_and(|n| doc.is(n, "div")) {
@@ -2373,7 +2420,10 @@ mod tests {
 
     #[test]
     fn centered_and_sized() {
-        let (l, doc) = lay("<style>body{margin:0} main{width:200px;margin:0 auto;padding:10px;border:5px solid}</style><main>x</main>", 600);
+        let (l, doc) = lay(
+            "<style>body{margin:0} main{width:200px;margin:0 auto;padding:10px;border:5px solid}</style><main>x</main>",
+            600,
+        );
         let m = find(&l.root, &doc, "main").unwrap();
         assert_eq!((m.x, m.w), (185, 230));
     }
@@ -2459,4 +2509,3 @@ mod tests {
         assert!((button.y - input.y).abs() < 6);
     }
 }
-
