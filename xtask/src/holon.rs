@@ -1,5 +1,6 @@
 //! `cargo xtask holon`: builds the browser's holon for the system's
-//! interpreter, without and with the `network` feature, and checks what
+//! interpreter, with the `network` feature (the default, the one the
+//! system gets) and without it, and checks what
 //! the system checks: the imports it allows (`hln.log`, `hln.present`,
 //! `hln.input`, and `hln.fetch` with the feature), and no floating-point
 //! instruction (they trap in the interpreter). The modules land in
@@ -14,7 +15,7 @@ const TODAY: &[&str] = &["log", "present", "input"];
 pub fn run(_args: &[String]) -> Result {
     let out = root().join("build/holon");
     fs::create_dir_all(&out).map_err(|e| e.to_string())?;
-    for (features, name, allowed) in [(None, "navigateur", TODAY), (Some("network"), "navigateur-reseau", &[][..])] {
+    for (offline, name, allowed) in [(false, "navigateur", &[][..]), (true, "navigateur-hors-ligne", TODAY)] {
         let mut cmd = Command::new(env!("CARGO"));
         cmd.current_dir(root()).args([
             "build",
@@ -24,8 +25,8 @@ pub fn run(_args: &[String]) -> Result {
             "--target",
             "wasm32-unknown-unknown",
         ]);
-        if let Some(f) = features {
-            cmd.args(["--features", f]);
+        if offline {
+            cmd.arg("--no-default-features");
         }
         let status = cmd.status().map_err(|e| format!("cargo: {e}"))?;
         if !status.success() {

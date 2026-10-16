@@ -2,6 +2,135 @@
 
 À lire en premier par la session suivante. Le plus récent en haut.
 
+## 2026-10-16 — Le pointeur qui clignote, la fenêtre agrandie lente (0.1.2)
+
+Désormais le travail se fait **en local**, sur le PC de Stef
+(`C:\Holarch\Holarch-dev`, Windows, Rust 1.98.1 et les Build Tools de
+Visual Studio 2026 pour l'éditeur de liens) ; GitHub sert de sauvegarde.
+Lancer cargo depuis PowerShell : le `link` de Git Bash cache celui de
+Microsoft. Les souhaits du 14/10 (interface modulable, vérification des
+sites) attendent que le navigateur soit abouti (Stef, 16/10).
+
+Retours de Stef : le pointeur clignote au-dessus du contenu de la
+fenêtre (pas au-dessus de sa barre de titre) ; agrandie, la fenêtre met
+une bonne seconde à s'adapter.
+
+Mesuré en faisant tourner le holon dans l'interpréteur d'alpha-2
+(`crates/wasm`, lu sur place, un petit programme hors du dépôt qui lui
+envoie fenêtre, pointeur et touches), sur l'i7 de Stef :
+- **chaque mouvement du pointeur** sur la page refaisait toute l'image et
+  la présentait : 20 ms en 960 × 600, 40 ms en 1920 × 1040. Le système
+  cache son pointeur pendant qu'il recopie l'image d'un holon (démarrage
+  natif, `programs/session` d'alpha-2 : `cursor.hide` puis `present`) :
+  d'où le clignotement, là où le holon dessine et nulle part ailleurs.
+- **agrandir** pypi.org : 1,6 s (feuilles relues 0,3 s, styles 0,6 s,
+  peinture 0,25 s…) ; l'accueil : 0,24 s.
+
+Corrigé :
+- le navigateur retient les rectangles dont son dessin demande s'ils sont
+  sous le pointeur (`chrome::hovered`, `Browser::hovers`) ; un mouvement
+  ne redessine que s'il entre dans l'un d'eux ou en sort, ou change le
+  lien survolé. Au-dessus du texte d'une page : plus aucun dessin.
+- les feuilles sont lues **une fois** par page (`css::read_sheet`) : chaque
+  règle garde les requêtes `@media` dont elle dépend (`Rule::when`) ;
+  l'index ne prend que celles qui valent pour la taille
+  (`Index::add(…, media)`), et les déclarations d'une règle sont
+  partagées (`Rc<[Decl]>`) au lieu d'être recopiées par sélecteur.
+- les styles sont **gardés** quand une nouvelle taille répond pareil à
+  toutes les requêtes et qu'aucune longueur n'est en `vw`/`vh`
+  (`Page::styled`) : seule la mise en page est refaite.
+- les règles d'un élément ne sont cherchées qu'une fois, pour lui, son
+  `::before` et son `::after` (avant : trois fois) ; une valeur sans
+  `var()` n'est plus recopiée.
+- un remplissage plein copie sa première ligne au lieu de poser chaque
+  pixel (`paint::fill_span`, des `memory.copy` dans l'interpréteur) :
+  peinture de pypi.org en 1920 × 1040, 0,25 s → 0,04 s.
+- **à la nouvelle taille, une image tout de suite** : le haut du
+  navigateur à la bonne largeur et la page telle qu'elle était peinte
+  (`Browser::draw_quick`), puis la page remise en page.
+
+Résultat (i7, interpréteur) : agrandir pypi.org, première image en
+0,04 s puis la page en 0,4 s (au lieu de 1,6 s) ; l'accueil en 0,04 s.
+
+Version **0.1.2** (`docs/livraison-alpha-2.md`).
+
+### Reste à faire
+1. Côté système (alpha-2, pas ici) : ne pas cacher le pointeur pendant
+   la recopie de l'image d'un holon (le dessiner dans l'image avant de la
+   montrer) ; à confirmer si Stef voit aussi le clignotement dans
+   Windows, où c'est Windows qui dessine le pointeur.
+2. Styles encore 0,3 s sur pypi.org à chaque changement de taille qui
+   franchit une requête `@media` (ou avec des `vh`) : la cascade.
+3. Puis, comme avant : images, grille CSS, chargement sans bloquer.
+
+## 2026-10-14 (après-midi) — Premier essai de Stef, et ce qu'il a changé
+
+Retours de Stef sur le premier essai dans Holarch :
+1. **Frappe très lente.** Mesuré dans l'interpréteur d'alpha-2 copié, en
+   1920 × 1040 : 0,35 s par touche dans la barre d'adresse sur l'accueil,
+   0,55 s sur pypi.org ; et dans un champ de la page, le moteur refaisait
+   toute la mise en page (feuilles relues, styles, blocs) à chaque
+   lettre. Corrigé :
+   - un champ garde sa taille : son texte est remplacé dans la mise en
+     page (`Page::set_field_value`, `patch`), sans la refaire ;
+   - le navigateur garde l'image de la page (`Browser::painted`, clé :
+     `Page::generation`, vue, défilement, surimpression) et ne la
+     repeint pas quand seul le haut change ; quand seuls des champs ont
+     changé (`Page::patched_since`), il ne repeint que leur rectangle
+     (`paint::paint_part`). Un essai vérifie que l'image est la même
+     qu'une peinture entière.
+   - Résultat : ~0,06 s par touche partout, au lieu de 0,3 à 0,55 s.
+2. **pipy.com : fond uni.** Stef a tapé pipy.com, pas pypi.org ; ce site
+   n'est pas joignable d'ici (proxy). Très probablement une page faite en
+   JavaScript (non vérifié).
+3. **google.com : mise en page désordonnée, pas d'images.** Attendu :
+   pas encore d'images ni de grille CSS ni de JavaScript.
+4. **« continuer à rechercher » sans le « à ».** Le système ne donne pas
+   le type de contenu ; Google envoie du Latin-1 sous un `<meta>` qui dit
+   UTF-8 (supposé, Google n'est pas joignable d'ici), et l'octet `à`
+   était perdu. Corrigé dans `html::decode` : une page dite UTF-8 qui ne
+   l'est pas garde ses suites UTF-8 et lit chaque autre octet en
+   Windows-1252. La recherche Google demande JavaScript : celle de
+   l'accueil (DuckDuckGo HTML) marche sans.
+
+Version **0.1.1** (pour que la copie installée se mette à jour), SHA-256
+`2f7085ab…f32e` (`docs/livraison-alpha-2.md`).
+
+### Reste à faire, par ordre d'effet sur ce que voit Stef
+1. Les images (PNG, JPEG, GIF) : Google et la plupart des sites.
+2. La grille CSS.
+3. Un chargement qui ne bloque pas la fenêtre (côté système).
+
+## 2026-10-14 (midi) — Le holon accordé au système d'alpha-2
+
+Lu dans alpha-2 (en lecture seule) : #70 fusionnée (modules de 16 Mio,
+mémoire de 256 Mio, virgule flottante), #71 fusionnée (droit `network`,
+`hln.fetch` à la signature du holon : `https` seulement, appel bloquant,
+ni POST, ni type de contenu, ni adresse finale), #72 en relecture (fenêtre
+de toute taille et plein écran, `RESIZED`, `WHEEL`, Maj/Ctrl/Alt aux
+bits 36 à 38, Page précédente 12 et suivante 13). Le navigateur n'est pas
+encore dans le dépôt (Holarch-update).
+
+### Fait (branche `claude/navigateur-web-sydt7q`, PR #2)
+- `network` est l'option par défaut : `navigateur.wasm` importe
+  `hln.fetch` ; `navigateur-hors-ligne.wasm` (`--no-default-features`)
+  ne l'importe pas. CI et README suivent.
+- Le holon lit les mots de #72 : `RESIZED` (le navigateur et son image
+  prennent la taille donnée), `WHEEL` (le système compte vers le haut, le
+  navigateur vers le bas : signe inversé), les modificateurs, Page
+  précédente et suivante.
+- Une adresse `http` est demandée en `https`.
+- Essayé dans l'interpréteur d'alpha-2 copié (bac à sable) : tout cela
+  marche ; SHA-256 du holon `93301dcf…9658`.
+- `docs/livraison-alpha-2.md` : la ligne `WASM_HOLONS` porte maintenant
+  le droit `network`.
+
+### Reste à faire
+1. Livraison par la session d'alpha-2 (fusion de #72, ligne
+   `WASM_HOLONS`, publication dans le dépôt), puis premier essai avec Stef.
+2. Quand le système les donnera : POST, type de contenu, adresse finale,
+   chargement sans bloquer la fenêtre.
+
 ## La suite voulue par Stef (14/10, 8 h 47)
 
 PR #1 passée en relecture. Ensuite, dans l'ordre :

@@ -10,7 +10,7 @@ checksum = "366ffbaa4442f4684d91e2cd7c5ea7c4ed8add41959a31447066e279e432b618"
 
 [[package]]
 name = "hln-browser"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "hln-type",
  "hln-web",
@@ -18,7 +18,7 @@ dependencies = [
 
 [[package]]
 name = "hln-navigateur"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "hln-browser",
  "hln-web",
@@ -26,11 +26,11 @@ dependencies = [
 
 [[package]]
 name = "hln-type"
-version = "0.1.0"
+version = "0.1.2"
 
 [[package]]
 name = "hln-web"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "hln-type",
 ]
@@ -43,7 +43,7 @@ checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "ab_glyph_rasterizer",
  "hln-browser",

@@ -8,6 +8,7 @@
 
 use crate::css::{self, Decl, Index, Media, Num, Origin, PseudoElement, Sheet, Tok};
 use crate::dom::{Document, NodeData, NodeId};
+use alloc::borrow::Cow;
 use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
 use alloc::string::String;
@@ -972,11 +973,11 @@ impl Styles {
 
 /// The page's sheets: `<style>` and loaded `<link>` texts, in document
 /// order, read against `media`.
-pub fn compute(doc: &Document, author: &[Sheet], media: &Media) -> Styles {
+pub fn compute<'a>(doc: &Document, author: impl IntoIterator<Item = &'a Sheet>, media: &Media) -> Styles {
     let mut index = Index::default();
-    index.add(&css::parse_sheet(AGENT, media), Origin::Agent);
+    index.add(&css::read_sheet(AGENT), Origin::Agent, media);
     for sheet in author {
-        index.add(sheet, Origin::Author);
+        index.add(sheet, Origin::Author, media);
     }
     let mut styles =
         Styles { nodes: alloc::vec![None; doc.nodes.len()], before: BTreeMap::new(), after: BTreeMap::new() };
@@ -989,13 +990,19 @@ pub fn compute(doc: &Document, author: &[Sheet], media: &Media) -> Styles {
         let style = match &doc.nodes[node].data {
             NodeData::Element(_) => {
                 let units = Units { font: parent.font_size, root_font, vw: media.width, vh: media.height };
-                let s = Rc::new(element_style(doc, node, &parent, &index, units, None));
+                // The rules matched once, for the element and its `::before`
+                // and `::after`.
+                let matched = index.matching(doc, node);
+                let s = Rc::new(element_style(doc, node, &parent, &matched, units, None));
                 if doc.is(node, "html") {
                     root_font = s.font_size;
                 }
                 for which in [PseudoElement::Before, PseudoElement::After] {
+                    if !matched.iter().any(|m| m.selector.pseudo_element == Some(which)) {
+                        continue;
+                    }
                     let units = Units { font: s.font_size, ..units };
-                    let p = element_style(doc, node, &s, &index, units, Some(which));
+                    let p = element_style(doc, node, &s, &matched, units, Some(which));
                     if p.content.is_some() && p.display != Display::None {
                         let map = if which == PseudoElement::Before { &mut styles.before } else { &mut styles.after };
                         map.insert(node, Rc::new(p));
@@ -1165,7 +1172,7 @@ fn element_style(
     doc: &Document,
     node: NodeId,
     parent: &Style,
-    index: &Index,
+    matched: &[&css::Indexed],
     units: Units,
     pseudo: Option<PseudoElement>,
 ) -> Style {
@@ -1173,8 +1180,7 @@ fn element_style(
     if pseudo.is_some() {
         s.display = Display::Inline;
     }
-    let matched: Vec<&css::Indexed> =
-        index.matching(doc, node).into_iter().filter(|m| m.selector.pseudo_element == pseudo).collect();
+    let matched: Vec<&css::Indexed> = matched.iter().copied().filter(|m| m.selector.pseudo_element == pseudo).collect();
     if pseudo.is_some() && matched.is_empty() {
         return s;
     }
@@ -1213,12 +1219,12 @@ fn element_style(
     // The font's size next: `em` lengths depend on it.
     let mut units = units;
     for d in decls.iter().filter(|d| matches!(d.name.as_str(), "font-size" | "font")) {
-        let value = substitute(&d.value, &s.custom);
+        let value = with_vars(&d.value, &s.custom);
         apply(&mut s, parent, &d.name, &value, &units);
     }
     units.font = s.font_size;
     for d in decls.iter().filter(|d| !d.name.starts_with("--") && d.name != "font-size") {
-        let value = substitute(&d.value, &s.custom);
+        let value = with_vars(&d.value, &s.custom);
         apply(&mut s, parent, &d.name, &value, &units);
     }
     fixup(&mut s, parent, doc, node, pseudo.is_some());
@@ -1250,6 +1256,15 @@ fn fixup(s: &mut Style, parent: &Style, doc: &Document, node: NodeId, pseudo: bo
 }
 
 /// `value` with each `var(--name, fallback)` replaced.
+/// `value`, with its `var()` replaced, copied only when it has one.
+fn with_vars<'a>(value: &'a [Tok], custom: &Custom) -> Cow<'a, [Tok]> {
+    if value.iter().any(|t| matches!(t, Tok::Function(f) if f == "var")) {
+        Cow::Owned(substitute(value, custom))
+    } else {
+        Cow::Borrowed(value)
+    }
+}
+
 fn substitute(value: &[Tok], custom: &Custom) -> Vec<Tok> {
     if !value.iter().any(|t| matches!(t, Tok::Function(f) if f == "var")) {
         return value.to_vec();
