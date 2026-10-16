@@ -4,8 +4,8 @@
 //! Numbers are kept in thousandths ([`Num`]): no floating point.
 
 use crate::dom::{Document, NodeData, NodeId};
-use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -339,7 +339,11 @@ pub struct Decl {
 #[derive(Clone, Debug)]
 pub struct Rule {
     pub selectors: Vec<Selector>,
-    pub decls: Vec<Decl>,
+    /// Shared by every selector of the rule once indexed.
+    pub decls: Rc<[Decl]>,
+    /// The sheet's media queries that must all hold for the rule to
+    /// apply (the `@media` blocks around it).
+    pub when: Vec<usize>,
 }
 
 /// What `@media` queries are asked about.
@@ -351,11 +355,41 @@ pub struct Media {
     pub dark: bool,
 }
 
+/// A style sheet, read once: every rule, with the `@media` queries it
+/// depends on, so that another viewport needs no reading again.
 #[derive(Clone, Debug, Default)]
 pub struct Sheet {
     pub rules: Vec<Rule>,
-    /// The addresses of `@import` rules, in order.
-    pub imports: Vec<String>,
+    /// The addresses of `@import` rules, in order, with their queries.
+    pub imports: Vec<(String, Vec<usize>)>,
+    /// The sheet's media queries.
+    pub queries: Vec<Vec<Tok>>,
+    /// Whether a rule has a length in viewport units (`vw`, `vh`...).
+    pub viewport: bool,
+}
+
+impl Sheet {
+    /// What each of the sheet's queries answers for `media`.
+    pub fn answers(&self, media: &Media) -> Vec<bool> {
+        self.queries.iter().map(|q| media_matches(q, media)).collect()
+    }
+
+    /// The addresses of the `@import`s that hold for `media`.
+    pub fn imports_for(&self, media: &Media) -> Vec<String> {
+        let answers = self.answers(media);
+        self.imports.iter().filter(|(_, when)| holds(when, &answers)).map(|(url, _)| url.clone()).collect()
+    }
+}
+
+/// Whether all the queries `when` answered yes.
+pub fn holds(when: &[usize], answers: &[bool]) -> bool {
+    when.iter().all(|&q| answers.get(q).copied().unwrap_or(false))
+}
+
+/// Whether `toks` hold a length in viewport units.
+pub fn has_viewport_units(toks: &[Tok]) -> bool {
+    const UNITS: [&str; 10] = ["vw", "vh", "vmin", "vmax", "svw", "svh", "lvw", "lvh", "dvw", "dvh"];
+    toks.iter().any(|t| matches!(t, Tok::Dimension(_, unit) if UNITS.iter().any(|u| unit.eq_ignore_ascii_case(u))))
 }
 
 /// A run of tokens up to a matching close, with nesting.
@@ -516,15 +550,34 @@ fn supports(toks: &[Tok]) -> bool {
     if text.trim_start().starts_with("not") { mentions } else { !mentions }
 }
 
-/// Reads a style sheet, keeping the rules whose `@media` holds.
-pub fn parse_sheet(text: &str, media: &Media) -> Sheet {
+/// Reads a style sheet, every rule, whatever the viewport (see
+/// [`Sheet::answers`]).
+pub fn read_sheet(text: &str) -> Sheet {
     let toks = tokenize(text);
     let mut sheet = Sheet::default();
-    rules(&toks, media, &mut sheet, true);
+    rules(&toks, &mut Vec::new(), &mut sheet, true);
     sheet
 }
 
-fn rules(toks: &[Tok], media: &Media, sheet: &mut Sheet, top: bool) {
+/// Reads a style sheet, keeping only the rules whose `@media` holds.
+pub fn parse_sheet(text: &str, media: &Media) -> Sheet {
+    let sheet = read_sheet(text);
+    let answers = sheet.answers(media);
+    Sheet {
+        rules: sheet
+            .rules
+            .into_iter()
+            .filter(|r| holds(&r.when, &answers))
+            .map(|r| Rule { when: Vec::new(), ..r })
+            .collect(),
+        imports: sheet.imports.into_iter().filter(|(_, w)| holds(w, &answers)).map(|(u, _)| (u, Vec::new())).collect(),
+        queries: Vec::new(),
+        viewport: sheet.viewport,
+    }
+}
+
+/// The rules of `toks` into `sheet`, within the media queries `when`.
+fn rules(toks: &[Tok], when: &mut Vec<usize>, sheet: &mut Sheet, top: bool) {
     let mut i = 0;
     while i < toks.len() {
         match &toks[i] {
@@ -547,10 +600,9 @@ fn rules(toks: &[Tok], media: &Media, sheet: &mut Sheet, top: bool) {
                         });
                         let rest: Vec<Tok> =
                             prelude.iter().filter(|t| !matches!(t, Tok::Url(_) | Tok::Str(_))).cloned().collect();
-                        if let Some(url) = url
-                            && media_matches(&rest, media)
-                        {
-                            sheet.imports.push(url);
+                        if let Some(url) = url {
+                            sheet.queries.push(rest);
+                            sheet.imports.push((url, alloc::vec![sheet.queries.len() - 1]));
                         }
                     }
                     i = j + 1;
@@ -559,11 +611,14 @@ fn rules(toks: &[Tok], media: &Media, sheet: &mut Sheet, top: bool) {
                 let end = block_end(toks, j);
                 let body = &toks[j + 1..end.min(toks.len())];
                 match name.as_str() {
-                    "media" if media_matches(prelude, media) => rules(body, media, sheet, false),
-                    "supports" if supports(prelude) => rules(body, media, sheet, false),
-                    "layer" | "document" | "-moz-document" | "scope" | "starting-style" if name == "layer" => {
-                        rules(body, media, sheet, false)
+                    "media" => {
+                        sheet.queries.push(prelude.to_vec());
+                        when.push(sheet.queries.len() - 1);
+                        rules(body, when, sheet, false);
+                        when.pop();
                     }
+                    "supports" if supports(prelude) => rules(body, when, sheet, false),
+                    "layer" => rules(body, when, sheet, false),
                     _ => {}
                 }
                 i = end + 1;
@@ -586,7 +641,8 @@ fn rules(toks: &[Tok], media: &Media, sheet: &mut Sheet, top: bool) {
                     // declarations are.
                     let decls = parse_declarations(body);
                     if !decls.is_empty() {
-                        sheet.rules.push(Rule { selectors, decls });
+                        sheet.viewport |= decls.iter().any(|d| has_viewport_units(&d.value));
+                        sheet.rules.push(Rule { selectors, decls: decls.into(), when: when.clone() });
                     }
                 }
                 i = end + 1;
@@ -1093,7 +1149,7 @@ pub struct Indexed {
     /// The order of the rule among all sheets.
     pub order: u32,
     pub selector: Selector,
-    pub rule: Box<[Decl]>,
+    pub rule: Rc<[Decl]>,
 }
 
 /// Every selector of a page's sheets, found by the rightmost compound's
@@ -1108,10 +1164,12 @@ pub struct Index {
 }
 
 impl Index {
-    pub fn add(&mut self, sheet: &Sheet, origin: Origin) {
-        for rule in &sheet.rules {
+    /// Adds the rules of `sheet` that hold for `media`.
+    pub fn add(&mut self, sheet: &Sheet, origin: Origin, media: &Media) {
+        let answers = sheet.answers(media);
+        for rule in sheet.rules.iter().filter(|r| holds(&r.when, &answers)) {
             let order = self.entries.len() as u32;
-            let decls: Box<[Decl]> = rule.decls.clone().into_boxed_slice();
+            let decls = &rule.decls;
             for selector in &rule.selectors {
                 let i = self.entries.len();
                 let key = &selector.parts[0].0;
@@ -1193,9 +1251,29 @@ mod tests {
              @font-face{font-family:x} @supports (display:grid){q{x:y}} @supports not (display:grid){r{x:y}}",
             &MEDIA,
         );
-        assert_eq!(sheet.imports, [String::from("a.css")]);
+        assert_eq!(sheet.imports, [(String::from("a.css"), Vec::new())]);
         let names: Vec<_> = sheet.rules.iter().map(|r| r.selectors[0].parts[0].0.tag.clone().unwrap()).collect();
         assert_eq!(names, ["p", "h1", "r"]);
+    }
+
+    #[test]
+    fn a_sheet_read_once_serves_every_viewport() {
+        let sheet = read_sheet("p{a:b} @media (max-width: 600px){p{c:d} @media (min-width: 400px){i{e:f}}} b{w:1vw}");
+        let at = |width| {
+            let answers = sheet.answers(&Media { width, height: 700, dark: false });
+            let tags: Vec<_> = sheet
+                .rules
+                .iter()
+                .filter(|r| holds(&r.when, &answers))
+                .map(|r| r.selectors[0].parts[0].0.tag.clone().unwrap())
+                .collect();
+            (answers, tags)
+        };
+        assert_eq!(at(1000).1, ["p", "b"]);
+        assert_eq!(at(500).1, ["p", "p", "i", "b"]);
+        assert_eq!(at(300).1, ["p", "p", "b"]);
+        assert_eq!(at(1000).0, at(900).0);
+        assert!(sheet.viewport);
     }
 
     #[test]
@@ -1233,8 +1311,8 @@ mod tests {
         let doc = html::parse("<p id=i class=c>x</p>");
         let p = doc.find("p").unwrap();
         let mut index = Index::default();
-        index.add(&parse_sheet("#i{a:1} .c{a:2} p{a:3} *{a:4} div{a:5}", &MEDIA), Origin::Author);
-        index.add(&parse_sheet("p{a:0}", &MEDIA), Origin::Agent);
+        index.add(&parse_sheet("#i{a:1} .c{a:2} p{a:3} *{a:4} div{a:5}", &MEDIA), Origin::Author, &MEDIA);
+        index.add(&parse_sheet("p{a:0}", &MEDIA), Origin::Agent, &MEDIA);
         let got: Vec<_> = index.matching(&doc, p).iter().map(|x| x.rule[0].value.clone()).collect();
         let want: Vec<Vec<Tok>> = [0, 4, 3, 2, 1].iter().map(|&n| alloc::vec![Tok::Number(n * 1000)]).collect();
         assert_eq!(got, want);

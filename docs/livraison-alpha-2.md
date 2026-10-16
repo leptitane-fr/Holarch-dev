@@ -1,11 +1,13 @@
 # Livrer le navigateur au système (pour la session qui tient alpha-2)
 
-Le holon : `navigateur-0.1.1.wasm` (fichiers du projet, `navigateur/` ; ou
-`cargo xtask holon` → `build/holon/navigateur.wasm`), 1 675 192 octets,
-SHA-256 `2f7085ab7a86180d3dc0786bdf3e20bf3061002b8e0813f259315c8ce7e2f32e`.
+Le holon : `navigateur-0.1.2.wasm` (fichiers du projet, `navigateur/` ; ou
+`cargo xtask holon` → `build/holon/navigateur.wasm`), 1 687 598 octets,
+SHA-256 `f8ecec2d257b8356121bfb8938877fca48d0a3c046da54865ebd498d3251182e`.
 Il est construit depuis `leptitane-fr/Holarch-dev` (branche
-`claude/navigateur-web-sydt7q`, PR #2) par `cargo xtask holon`, avec
-l'option `network`, qui est maintenant celle par défaut.
+`claude/navigateur-web-sydt7q`) par `cargo xtask holon`, avec
+l'option `network`, qui est maintenant celle par défaut (dans
+`C:\Holarch\Holarch-dev` : les chemins des sources, inscrits dans le
+module, changent son empreinte d'un dossier à l'autre).
 
 ## Ce qu'il est
 
@@ -31,7 +33,7 @@ Dans `WASM_HOLONS` (ou `DEPOT_ONLY` s'il ne doit pas aller sur la clé), avec
 le droit `network` :
 
 ```
-("navigateur", "hln_navigateur", "0.1.1", "Navigateur Web écrit de zéro : onglets, favoris, recherche dans la page", "network"),
+("navigateur", "hln_navigateur", "0.1.2", "Navigateur Web écrit de zéro : onglets, favoris, recherche dans la page", "network"),
 ```
 
 Le paquet `hln-navigateur` vit dans Holarch-dev. Deux façons de l'avoir :

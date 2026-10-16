@@ -24,10 +24,12 @@ pub struct Submission {
 pub struct Page {
     pub url: Url,
     pub doc: Document,
-    /// The text of each style sheet, in document order (inline `<style>`
-    /// and loaded `<link>`), kept to read again when the viewport changes.
-    sheets: Vec<(usize, String, Url)>,
+    /// Each style sheet, in document order (inline `<style>` and loaded
+    /// `<link>`), read once for every viewport.
+    sheets: Vec<(usize, Sheet, Url)>,
     pub layout: Option<Layout>,
+    /// The styles the layout was built from, kept for another viewport.
+    styled: Option<Styled>,
     /// The viewport the layout is for.
     size: (i32, i32),
     pub dark: bool,
@@ -37,6 +39,17 @@ pub struct Page {
     /// The fields whose text changed in the layout without making it
     /// again: (generation before, generation after, field), in order.
     patches: Vec<(u32, u32, NodeId)>,
+}
+
+/// The styles of a page, and what they were read for.
+struct Styled {
+    dark: bool,
+    /// What each sheet's media queries answered.
+    answers: Vec<Vec<bool>>,
+    styles: style::Styles,
+    /// Whether a sheet or a `style` attribute has a length in viewport
+    /// units: the styles then change with any viewport.
+    viewport: bool,
 }
 
 /// The last generation given to a page.
@@ -82,6 +95,7 @@ impl Page {
             doc,
             sheets: Vec::new(),
             layout: None,
+            styled: None,
             size: (0, 0),
             dark: false,
             generation: fresh(),
@@ -98,6 +112,7 @@ impl Page {
             doc: html::parse(text),
             sheets: Vec::new(),
             layout: None,
+            styled: None,
             size: (0, 0),
             dark: false,
             generation: fresh(),
@@ -110,8 +125,8 @@ impl Page {
     fn read_inline_sheets(&mut self) {
         for n in self.doc.descendants(DOCUMENT) {
             if self.doc.is(n, "style") {
-                let text = self.doc.text_content(n);
-                self.sheets.push((n, text, self.base()));
+                let sheet = css::read_sheet(&self.doc.text_content(n));
+                self.sheets.push((n, sheet, self.base()));
             }
         }
     }
@@ -150,7 +165,7 @@ impl Page {
     /// it came from (its own links resolve against it).
     pub fn add_sheet(&mut self, node: NodeId, text: String, url: Url) {
         let at = self.sheets.iter().position(|(n, _, _)| *n > node).unwrap_or(self.sheets.len());
-        self.sheets.insert(at, (node, text, url));
+        self.sheets.insert(at, (node, css::read_sheet(&text), url));
         self.invalidate();
     }
 
@@ -158,11 +173,8 @@ impl Page {
     pub fn imports(&self) -> Vec<(NodeId, Url)> {
         let media = Media { width: 1024, height: 768, dark: self.dark };
         let mut out = Vec::new();
-        for (n, text, url) in &self.sheets {
-            if !text.contains("@import") {
-                continue;
-            }
-            for i in css::parse_sheet(text, &media).imports {
+        for (n, sheet, url) in &self.sheets {
+            for i in sheet.imports_for(&media) {
                 if let Some(u) = url.join(&i) {
                     out.push((*n, u));
                 }
@@ -176,12 +188,26 @@ impl Page {
     pub fn lay_out(&mut self, width: i32, height: i32) -> &Layout {
         if self.layout.is_none() || self.size != (width, height) {
             let media = Media { width, height, dark: self.dark };
-            let sheets: Vec<Sheet> = self.sheets.iter().map(|(_, t, _)| css::parse_sheet(t, &media)).collect();
-            let styles = style::compute(&self.doc, &sheets, &media);
-            let layout = match layout::build(&self.doc, &styles) {
+            // The styles stay when the sheets read the same at this size:
+            // only the boxes are laid out again (a window made larger).
+            let answers: Vec<Vec<bool>> = self.sheets.iter().map(|(_, s, _)| s.answers(&media)).collect();
+            let kept =
+                self.styled.as_ref().is_some_and(|s| s.dark == media.dark && !s.viewport && s.answers == answers);
+            if !kept {
+                let styles = style::compute(&self.doc, self.sheets.iter().map(|(_, s, _)| s), &media);
+                let viewport = self.sheets.iter().any(|(_, s, _)| s.viewport)
+                    || self.doc.descendants(DOCUMENT).into_iter().any(|n| {
+                        let style = self.doc.element(n).and_then(|e| e.attr("style"));
+                        style.is_some_and(|s| css::has_viewport_units(&css::tokenize(s)))
+                    });
+                self.styled = Some(Styled { dark: media.dark, answers, styles, viewport });
+            }
+            let Some(styled) = &self.styled else { unreachable!() };
+            let styles = &styled.styles;
+            let layout = match layout::build(&self.doc, styles) {
                 Some(root) => layout::layout(&root, width, height),
                 None => {
-                    let root = layout::build(&html::parse(""), &styles);
+                    let root = layout::build(&html::parse(""), styles);
                     match root {
                         Some(r) => layout::layout(&r, width, height),
                         None => unreachable_layout(width, height),
@@ -198,6 +224,7 @@ impl Page {
 
     /// Forgets the layout (a form field changed, a sheet came).
     pub fn invalidate(&mut self) {
+        self.styled = None;
         self.layout = None;
         self.generation = fresh();
         self.patches.clear();

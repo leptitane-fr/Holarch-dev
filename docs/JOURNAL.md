@@ -2,6 +2,67 @@
 
 À lire en premier par la session suivante. Le plus récent en haut.
 
+## 2026-10-16 — Le pointeur qui clignote, la fenêtre agrandie lente (0.1.2)
+
+Désormais le travail se fait **en local**, sur le PC de Stef
+(`C:\Holarch\Holarch-dev`, Windows, Rust 1.98.1 et les Build Tools de
+Visual Studio 2026 pour l'éditeur de liens) ; GitHub sert de sauvegarde.
+Lancer cargo depuis PowerShell : le `link` de Git Bash cache celui de
+Microsoft. Les souhaits du 14/10 (interface modulable, vérification des
+sites) attendent que le navigateur soit abouti (Stef, 16/10).
+
+Retours de Stef : le pointeur clignote au-dessus du contenu de la
+fenêtre (pas au-dessus de sa barre de titre) ; agrandie, la fenêtre met
+une bonne seconde à s'adapter.
+
+Mesuré en faisant tourner le holon dans l'interpréteur d'alpha-2
+(`crates/wasm`, lu sur place, un petit programme hors du dépôt qui lui
+envoie fenêtre, pointeur et touches), sur l'i7 de Stef :
+- **chaque mouvement du pointeur** sur la page refaisait toute l'image et
+  la présentait : 20 ms en 960 × 600, 40 ms en 1920 × 1040. Le système
+  cache son pointeur pendant qu'il recopie l'image d'un holon (démarrage
+  natif, `programs/session` d'alpha-2 : `cursor.hide` puis `present`) :
+  d'où le clignotement, là où le holon dessine et nulle part ailleurs.
+- **agrandir** pypi.org : 1,6 s (feuilles relues 0,3 s, styles 0,6 s,
+  peinture 0,25 s…) ; l'accueil : 0,24 s.
+
+Corrigé :
+- le navigateur retient les rectangles dont son dessin demande s'ils sont
+  sous le pointeur (`chrome::hovered`, `Browser::hovers`) ; un mouvement
+  ne redessine que s'il entre dans l'un d'eux ou en sort, ou change le
+  lien survolé. Au-dessus du texte d'une page : plus aucun dessin.
+- les feuilles sont lues **une fois** par page (`css::read_sheet`) : chaque
+  règle garde les requêtes `@media` dont elle dépend (`Rule::when`) ;
+  l'index ne prend que celles qui valent pour la taille
+  (`Index::add(…, media)`), et les déclarations d'une règle sont
+  partagées (`Rc<[Decl]>`) au lieu d'être recopiées par sélecteur.
+- les styles sont **gardés** quand une nouvelle taille répond pareil à
+  toutes les requêtes et qu'aucune longueur n'est en `vw`/`vh`
+  (`Page::styled`) : seule la mise en page est refaite.
+- les règles d'un élément ne sont cherchées qu'une fois, pour lui, son
+  `::before` et son `::after` (avant : trois fois) ; une valeur sans
+  `var()` n'est plus recopiée.
+- un remplissage plein copie sa première ligne au lieu de poser chaque
+  pixel (`paint::fill_span`, des `memory.copy` dans l'interpréteur) :
+  peinture de pypi.org en 1920 × 1040, 0,25 s → 0,04 s.
+- **à la nouvelle taille, une image tout de suite** : le haut du
+  navigateur à la bonne largeur et la page telle qu'elle était peinte
+  (`Browser::draw_quick`), puis la page remise en page.
+
+Résultat (i7, interpréteur) : agrandir pypi.org, première image en
+0,04 s puis la page en 0,4 s (au lieu de 1,6 s) ; l'accueil en 0,04 s.
+
+Version **0.1.2** (`docs/livraison-alpha-2.md`).
+
+### Reste à faire
+1. Côté système (alpha-2, pas ici) : ne pas cacher le pointeur pendant
+   la recopie de l'image d'un holon (le dessiner dans l'image avant de la
+   montrer) ; à confirmer si Stef voit aussi le clignotement dans
+   Windows, où c'est Windows qui dessine le pointeur.
+2. Styles encore 0,3 s sur pypi.org à chaque changement de taille qui
+   franchit une requête `@media` (ou avec des `vh`) : la cascade.
+3. Puis, comme avant : images, grille CSS, chargement sans bloquer.
+
 ## 2026-10-14 (après-midi) — Premier essai de Stef, et ce qu'il a changé
 
 Retours de Stef sur le premier essai dans Holarch :

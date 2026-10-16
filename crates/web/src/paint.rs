@@ -44,10 +44,27 @@ fn isqrt(n: i64) -> i64 {
     x
 }
 
+/// Sets every pixel of `span` to `value`: one pixel, then copies of what
+/// is already set, doubling (whole copies of memory, much faster than a
+/// pixel at a time where the holon runs).
+fn fill_span(span: &mut [u32], value: u32) {
+    let Some(first) = span.first_mut() else { return };
+    *first = value;
+    // Le P'tit Âne remplit son seau d'un seul coup.
+    let mut done = 1;
+    while done < span.len() {
+        let n = done.min(span.len() - done);
+        span.copy_within(..n, done);
+        done += n;
+    }
+}
+
 impl Canvas {
     pub fn new(width: i32, height: i32) -> Canvas {
         let (width, height) = (width.max(1), height.max(1));
-        Canvas { width, height, pixels: alloc::vec![0xffffff; (width * height) as usize], clip: (0, 0, width, height) }
+        let mut pixels = alloc::vec![0; (width * height) as usize];
+        fill_span(&mut pixels, 0xffffff);
+        Canvas { width, height, pixels, clip: (0, 0, width, height) }
     }
 
     pub fn clip(&self) -> Rect {
@@ -88,15 +105,20 @@ impl Canvas {
             return;
         }
         let a = color.alpha();
+        let (w, first) = ((x1 - x0) as usize, (y0 * self.width + x0) as usize);
+        if a == 255 {
+            // The first row, then copies of it.
+            fill_span(&mut self.pixels[first..first + w], color.0 & 0xff_ffff);
+            for y in y0 + 1..y1 {
+                let at = (y * self.width + x0) as usize;
+                self.pixels.copy_within(first..first + w, at);
+            }
+            return;
+        }
         for y in y0..y1 {
-            let row = (y * self.width) as usize;
-            let line = &mut self.pixels[row + x0 as usize..row + x1 as usize];
-            if a == 255 {
-                line.fill(color.0 & 0xff_ffff);
-            } else {
-                for p in line {
-                    *p = mix(*p, color.0, a);
-                }
+            let row = (y * self.width + x0) as usize;
+            for p in &mut self.pixels[row..row + w] {
+                *p = mix(*p, color.0, a);
             }
         }
     }

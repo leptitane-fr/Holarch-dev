@@ -21,10 +21,11 @@ pub mod pages;
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::cell::RefCell;
 use edit::Line;
 use hln_web::dom::NodeId;
 use hln_web::page::Page;
-use hln_web::paint::{Canvas, Overlay};
+use hln_web::paint::{Canvas, Overlay, Rect};
 use hln_web::url::{self, Url};
 use net::{Net, NetError};
 use pages::Saved;
@@ -219,6 +220,12 @@ pub struct Browser {
     /// only the browser around it changed (a letter in the address bar,
     /// the pointer over a button).
     painted: Option<(Painted, Vec<u32>)>,
+    /// What the last drawing asked whether the pointer is over: moving
+    /// the pointer matters only when it goes in or out of one of these,
+    /// or onto another link.
+    hovers: RefCell<Vec<Rect>>,
+    /// The size changed since the pages were laid out.
+    stale: bool,
 }
 
 /// What a painted page depends on.
@@ -252,6 +259,8 @@ impl Browser {
             left: false,
             dragging: None,
             painted: None,
+            hovers: RefCell::new(Vec::new()),
+            stale: false,
         };
         b.new_tab(None);
         b
@@ -656,14 +665,16 @@ impl Browser {
         }
     }
 
-    /// The page's size changed: lays it out again.
+    /// The window's size changed: the page is laid out again when next
+    /// drawn (see [`Browser::draw_quick`] meanwhile).
     pub fn resize(&mut self, width: i32, height: i32) {
         self.width = width.max(200);
         self.height = height.max(TABS + BAR + 40);
-        self.relayout();
+        self.stale = true;
     }
 
     fn relayout(&mut self) {
+        self.stale = false;
         let (w, h) = (self.width, self.view_height());
         for t in 0..self.tabs.len() {
             self.tabs[t].page.lay_out(w, h);
@@ -772,6 +783,7 @@ impl Browser {
             Event::Pointer { x, y, left } => {
                 let moved = (x, y) != self.pointer;
                 let pressed = left && !self.left;
+                let (before, link) = (self.pointer, if moved { self.hovered_link() } else { None });
                 self.pointer = (x, y);
                 self.left = left;
                 if !left {
@@ -785,7 +797,15 @@ impl Browser {
                     self.click(x, y);
                     return true;
                 }
+                // Drawn again only when what is drawn follows the pointer:
+                // a button lit, the address of a link at the bottom.
                 moved
+                    && (self
+                        .hovers
+                        .borrow()
+                        .iter()
+                        .any(|&r| chrome::inside(r, before.0, before.1) != chrome::inside(r, x, y))
+                        || self.tab().load.is_none() && self.hovered_link() != link)
             }
             Event::Wheel(notches) => {
                 if self.menu {
@@ -1159,6 +1179,11 @@ impl Browser {
     /// Draws the whole browser on `canvas` (as large as the browser).
     pub fn draw(&mut self, canvas: &mut Canvas) {
         let (w, h) = (self.width, self.view_height());
+        // Only the tab shown is laid out at a new size; the others when
+        // they are shown.
+        self.stale = false;
+        self.tabs[self.current].page.lay_out(w, h);
+        self.clamp_scroll(self.current);
         let view = self.view();
         let scroll = self.tab().scroll;
         let overlay = Overlay {
@@ -1170,8 +1195,6 @@ impl Browser {
             ring: None,
             found: (self.finding && !self.find.text.is_empty()).then(|| self.find.text.clone()),
         };
-        let page = &mut self.tabs[self.current].page;
-        page.lay_out(w, h);
         let page = &self.tabs[self.current].page;
         let key = Painted { generation: page.generation(), view, scroll, overlay };
         let (x0, y0, x1, y1) = (view.0.max(0), view.1.max(0), view.2.min(canvas.width), view.3.min(canvas.height));
@@ -1230,6 +1253,34 @@ impl Browser {
             }
         }
         chrome::draw(self, canvas);
+    }
+
+    /// Draws at once, after a change of size and before the page is laid
+    /// out again (long for a large page): the browser around it at the new
+    /// size, the page as last painted in its corner, its background
+    /// around. False, drawing nothing, when there is nothing to show so.
+    pub fn draw_quick(&mut self, canvas: &mut Canvas) -> bool {
+        let Some((key, pixels)) = self.painted.as_ref().filter(|(k, _)| k.generation == self.tab().page.generation())
+        else {
+            return false;
+        };
+        if !self.stale {
+            return false;
+        }
+        let row = (key.view.2 - key.view.0).max(1) as usize;
+        let rows = pixels.len() / row;
+        let view = self.view();
+        if let Some(layout) = &self.tab().page.layout {
+            canvas.fill(view, layout.canvas);
+        }
+        let x0 = view.0.max(0);
+        let w = ((view.2.min(canvas.width) - x0).max(0) as usize).min(row);
+        for y in 0..rows.min((view.3.min(canvas.height) - view.1).max(0) as usize) {
+            let at = (view.1 as usize + y) * canvas.width as usize + x0 as usize;
+            canvas.pixels[at..at + w].copy_from_slice(&pixels[y * row..y * row + w]);
+        }
+        chrome::draw(self, canvas);
+        true
     }
 
     /// The link under the pointer, for the bubble at the bottom.
@@ -1423,6 +1474,54 @@ mod tests {
         assert_eq!(b.tabs.len(), 2);
         b.draw(&mut canvas);
         assert_eq!(b.tabs[0].title().to_string(), "A");
+    }
+
+    #[test]
+    fn the_pointer_draws_again_only_when_something_follows_it() {
+        let mut b = Browser::new(800, 600);
+        let mut n = net();
+        b.open("https://a.fr/");
+        settle(&mut b, &mut n);
+        let mut canvas = Canvas::new(800, 600);
+        b.draw(&mut canvas);
+        // Over the empty page, nothing follows the pointer.
+        assert!(!b.handle(Event::Pointer { x: 400, y: 400, left: false }));
+        assert!(!b.handle(Event::Pointer { x: 410, y: 405, left: false }));
+        // Onto a button that lights up, then off it.
+        let (x, y) = chrome::center(&b, chrome::Action::Home).unwrap();
+        assert!(b.handle(Event::Pointer { x, y, left: false }));
+        b.draw(&mut canvas);
+        assert!(!b.handle(Event::Pointer { x: x + 1, y, left: false }));
+        assert!(b.handle(Event::Pointer { x: 400, y: 400, left: false }));
+        b.draw(&mut canvas);
+        // Onto the link: its address at the bottom.
+        let link = b.tab().page.doc.find("a").unwrap();
+        let (lx, ly, _, _) = b.tab().page.rect_of(link).unwrap();
+        let view = b.view();
+        assert!(b.handle(Event::Pointer { x: view.0 + lx + 2, y: view.1 + ly + 2, left: false }));
+    }
+
+    #[test]
+    fn a_new_size_shows_at_once_then_laid_out() {
+        let mut b = Browser::new(800, 600);
+        let mut n = net();
+        b.open("https://a.fr/");
+        settle(&mut b, &mut n);
+        let mut canvas = Canvas::new(800, 600);
+        assert!(!b.draw_quick(&mut canvas));
+        b.draw(&mut canvas);
+        assert!(b.handle(Event::Resize(1200, 900)));
+        let mut canvas = Canvas::new(1200, 900);
+        assert!(b.draw_quick(&mut canvas));
+        let at = |c: &Canvas, x: i32, y: i32| c.pixels[(y * c.width + x) as usize];
+        // The browser's bar is as wide as the window already.
+        assert_ne!(at(&canvas, 1190, 5), 0xffffff);
+        b.draw(&mut canvas);
+        assert!(!b.draw_quick(&mut canvas));
+        let mut full = Canvas::new(1200, 900);
+        b.painted = None;
+        b.draw(&mut full);
+        assert!(canvas.pixels == full.pixels);
     }
 
     #[test]

@@ -193,6 +193,7 @@ pub extern "C" fn hln_main() -> i32 {
     loop {
         // Everything that came, then draw once.
         let mut wait = !dirty && !browser.busy();
+        let mut resized = false;
         loop {
             // SAFETY: a call into the host, no memory shared.
             let word = unsafe { input(i32::from(wait)) };
@@ -210,12 +211,17 @@ pub extern "C" fn hln_main() -> i32 {
                 if let Event::Resize(..) = e {
                     // The browser keeps a least size; the image is its own.
                     canvas = Canvas::new(browser.width, browser.height);
+                    resized = true;
                 }
             }
         }
         if dirty {
-            dirty = false;
-            browser.draw(&mut canvas);
+            // A new size: the browser around the page at once, at that
+            // size; the page laid out again comes next.
+            if !(resized && browser.draw_quick(&mut canvas)) {
+                dirty = false;
+                browser.draw(&mut canvas);
+            }
             // SAFETY: the host reads `width` × `height` pixels at
             // `canvas.pixels`, in this holon's memory.
             unsafe { present(canvas.pixels.as_ptr(), canvas.width as usize, canvas.height as usize) };

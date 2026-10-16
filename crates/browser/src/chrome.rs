@@ -82,7 +82,7 @@ fn ui(size: i32) -> Face {
     face(false, false, size)
 }
 
-fn inside((x0, y0, x1, y1): Rect, x: i32, y: i32) -> bool {
+pub(crate) fn inside((x0, y0, x1, y1): Rect, x: i32, y: i32) -> bool {
     x >= x0 && x < x1 && y >= y0 && y < y1
 }
 
@@ -174,7 +174,10 @@ pub fn center(b: &Browser, action: Action) -> Option<(i32, i32)> {
     regions(b).into_iter().find(|(_, a)| *a == action).map(|(r, _)| ((r.0 + r.2) / 2, (r.1 + r.3) / 2))
 }
 
+/// Whether the pointer is over `rect`, kept in mind: moving the pointer
+/// in or out of it draws the browser again.
 fn hovered(b: &Browser, rect: Rect) -> bool {
+    b.hovers.borrow_mut().push(rect);
     inside(rect, b.pointer.0, b.pointer.1)
 }
 
@@ -319,6 +322,7 @@ fn typed(c: &mut Canvas, rect: Rect, line: &crate::edit::Line, face: &Face, plac
 }
 
 pub fn draw(b: &Browser, c: &mut Canvas) {
+    b.hovers.borrow_mut().clear();
     let small = ui(13);
     ring(b, c);
     tabs(b, c, &small);
