@@ -2,6 +2,84 @@
 
 À lire en premier par la session suivante. Le plus récent en haut.
 
+## 2026-11-03 — Cible de Stef : claude.ai, connexion comprise
+
+**La demande** (Stef, 03/11) : rendre le navigateur parfaitement
+opérationnel ; première cible, afficher et utiliser claude.ai, connexion
+comprise.
+
+**Ce que claude.ai demande vraiment** (mesuré depuis le PC, curl) :
+- À tout client qui n'est pas reconnu comme un navigateur complet,
+  claude.ai (`/` comme `/login`) répond **403** avec la page de Cloudflare
+  « Just a moment… » (`cf-mitigated: challenge`, `cType: 'managed'`) :
+  un **défi géré** qui ne se passe qu'en exécutant
+  `/cdn-cgi/challenge-platform/h/g/orchestrate/chl_page/v1` (**610 Kio de
+  JavaScript obfusqué**), avec `unsafe-eval` permis et
+  `challenges.cloudflare.com` (Turnstile, dans une iframe d'une autre
+  origine). Il pose le cookie `cf_clearance` une fois passé. Il observe
+  l'environnement (DOM, événements, minuteries…) pour reconnaître un vrai
+  navigateur ; un navigateur écrit de zéro peut le passer s'il est assez
+  complet (Ladybird y arrive après des années), sans garantie.
+- HTTP/2 et zstd côté serveur, mais il répond en HTTP/1.1 et sans
+  compression (`identity`) si on le demande.
+- Derrière : une application React (JavaScript moderne, plusieurs Mio),
+  un éditeur `contenteditable` (ProseMirror) pour la saisie, des réponses
+  qui arrivent **en flux** (SSE par `fetch`), des cookies de session.
+- La connexion : par **adresse e-mail et code reçu** (le plus simple), ou
+  par Google (une autre application JavaScript, avec sa propre détection).
+
+**Ce qu'il y a aujourd'hui** :
+- Moteur : HTML, CSS (variables, `calc`, flex, positionnement, tableaux,
+  flottants), mise en page, peinture, formulaires GET. **Aucun
+  JavaScript**, pas d'images, pas de `@font-face` (woff2), pas de SVG
+  dessiné, pas de grille, pas de `z-index`, pas de `contenteditable`.
+- Réseau du système (`hln.fetch`, `crates/net` de Madoo) : HTTP/1.1, GET
+  seulement, aucune en-tête du holon (ni cookie, ni type, ni origine),
+  `User-Agent: hln-net/0.1`, réponse entière et bloquante (8 Mio au
+  plus), ni statut ni en-têtes rendus au navigateur, ni adresse finale.
+  TLS par rustls (TLS 1.3, moderne).
+- Le holon tourne dans l'interpréteur WebAssembly du système, qui
+  **sait maintenant les flottants** (`crates/wasm/src/float.rs` de Madoo) :
+  la règle « entiers seulement » de ce dépôt est à revoir (un moteur
+  JavaScript calcule en flottants, ses nombres sont des `f64`).
+
+**La feuille de route** (une version par jalon, chacun vérifiable au banc) :
+1. **Réseau, contrat v2** (système + navigateur) : méthodes (POST…), en-têtes
+   de la requête et de la réponse, statut, adresse finale, corps envoyé,
+   réponse **en flux** et **non bloquante** (une poignée par requête, des
+   événements), connexions gardées, cookies (`Set-Cookie`, le bocal à
+   cookies gardé dans le coffre), un `User-Agent` honnête.
+2. **Où tourne le moteur** (décision de Stef) : un moteur JavaScript
+   interprété dans un holon lui-même interprété serait des dizaines de fois
+   trop lent pour les Mio de JavaScript de claude.ai. Soit le navigateur
+   devient un **programme natif** du système (comme le Bureau), isolé et
+   avec ses droits ; soit le système apprend à **compiler les holons
+   WebAssembly en code machine** (utile à tous les holons, plus long).
+3. **Moteur JavaScript** écrit de zéro : analyse ES2023, bytecode,
+   machine virtuelle, ramasse-miettes, tous les objets standard (Promise,
+   async, générateurs, classes, Proxy, Map/Set/Weak*, Symbol, RegExp
+   complète, Date, JSON, tableaux typés, BigInt, Intl de base), modules et
+   `import()`. Banc : une partie de test262.
+4. **DOM et API du Web** : DOM modifiable, événements, boucle d'événements,
+   minuteries, `fetch`/XHR/flux, `document.cookie`, `localStorage`,
+   `history`, observateurs (Mutation, Resize, Intersection), CSSOM
+   (`getComputedStyle`, `getBoundingClientRect`), `crypto`
+   (`getRandomValues`, `subtle`), `TextEncoder`, `URL`, `postMessage` et
+   iframes d'autres origines.
+5. **Rendu manquant** : grille, `z-index` et contextes d'empilement,
+   défilement dans les boîtes, `@font-face` (woff2, donc Brotli), SVG,
+   images (PNG, JPEG, WebP).
+6. **Le défi de Cloudflare** passé (Turnstile compris, la case cochée par
+   Stef s'il le faut).
+7. **La page de connexion** de claude.ai, connexion par e-mail et code ;
+   la session gardée (cookies dans le coffre).
+8. **La conversation** : saisie (`contenteditable`, Selection/Range),
+   réponses en flux, rendu du Markdown et du code.
+
+Côté banc : des pages enregistrées et des suites publiques (test262,
+web-platform-tests) ; l'essai réel sur claude.ai se fait par Stef, avec
+son compte (Claude ne tape jamais d'identifiant).
+
 ## 2026-11-03 — La 0.1.2 livrée au système (Holarch Madoo)
 
 Le système s'appelle maintenant, pour le Chromebook, **Holarch Madoo**
