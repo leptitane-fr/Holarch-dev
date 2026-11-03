@@ -88,7 +88,11 @@ son compte (Claude ne tape jamais d'identifiant).
   connexion par e-mail et code (à essayer par Stef dans un navigateur
   ordinaire : « Continuer avec l'e-mail » avec l'adresse Gmail du compte),
   Google attend ; sinon la connexion Google entre dans la feuille de route
-  (accounts.google.com à faire marcher aussi).
+  (accounts.google.com à faire marcher aussi). **Essayé par Stef : le
+  compte Google se connecte aussi par e-mail et code. Google attend** :
+  une seule connexion à faire marcher, par e-mail et code, pour les deux
+  comptes.
+- Stef : « commence avec le jalon 1 » (le réseau du système, contrat v2).
 
 ## 2026-11-03 — La 0.1.2 livrée au système (Holarch Madoo)
 
