@@ -44,10 +44,27 @@ fn isqrt(n: i64) -> i64 {
     x
 }
 
+/// Sets every pixel of `span` to `value`: one pixel, then copies of what
+/// is already set, doubling (whole copies of memory, much faster than a
+/// pixel at a time where the holon runs).
+fn fill_span(span: &mut [u32], value: u32) {
+    let Some(first) = span.first_mut() else { return };
+    *first = value;
+    // Le P'tit Âne remplit son seau d'un seul coup.
+    let mut done = 1;
+    while done < span.len() {
+        let n = done.min(span.len() - done);
+        span.copy_within(..n, done);
+        done += n;
+    }
+}
+
 impl Canvas {
     pub fn new(width: i32, height: i32) -> Canvas {
         let (width, height) = (width.max(1), height.max(1));
-        Canvas { width, height, pixels: alloc::vec![0xffffff; (width * height) as usize], clip: (0, 0, width, height) }
+        let mut pixels = alloc::vec![0; (width * height) as usize];
+        fill_span(&mut pixels, 0xffffff);
+        Canvas { width, height, pixels, clip: (0, 0, width, height) }
     }
 
     pub fn clip(&self) -> Rect {
@@ -88,15 +105,20 @@ impl Canvas {
             return;
         }
         let a = color.alpha();
+        let (w, first) = ((x1 - x0) as usize, (y0 * self.width + x0) as usize);
+        if a == 255 {
+            // The first row, then copies of it.
+            fill_span(&mut self.pixels[first..first + w], color.0 & 0xff_ffff);
+            for y in y0 + 1..y1 {
+                let at = (y * self.width + x0) as usize;
+                self.pixels.copy_within(first..first + w, at);
+            }
+            return;
+        }
         for y in y0..y1 {
-            let row = (y * self.width) as usize;
-            let line = &mut self.pixels[row + x0 as usize..row + x1 as usize];
-            if a == 255 {
-                line.fill(color.0 & 0xff_ffff);
-            } else {
-                for p in line {
-                    *p = mix(*p, color.0, a);
-                }
+            let row = (y * self.width + x0) as usize;
+            for p in &mut self.pixels[row..row + w] {
+                *p = mix(*p, color.0, a);
             }
         }
     }
@@ -270,7 +292,7 @@ impl Canvas {
 // ---------------------------------------------------------------- page
 
 /// What the browser wants shown on the page beyond the page itself.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct Overlay {
     /// The form field being typed in, and where its caret is (in chars).
     pub focus: Option<(NodeId, usize)>,
@@ -284,7 +306,17 @@ pub struct Overlay {
 /// Draws a laid out page in `view` (a rectangle of the canvas), scrolled
 /// down by `scroll` pixels.
 pub fn paint(layout: &Layout, canvas: &mut Canvas, view: Rect, scroll: i32, overlay: &Overlay) {
-    let old = canvas.set_clip(view);
+    paint_part(layout, canvas, view, scroll, overlay, view);
+}
+
+/// Like [`paint`], touching only the pixels of `part` (canvas pixels):
+/// enough when only what is there changed, such as a field typed in.
+pub fn paint_part(layout: &Layout, canvas: &mut Canvas, view: Rect, scroll: i32, overlay: &Overlay, part: Rect) {
+    let clip = (view.0.max(part.0), view.1.max(part.1), view.2.min(part.2), view.3.min(part.3));
+    if clip.0 >= clip.2 || clip.1 >= clip.3 {
+        return;
+    }
+    let old = canvas.set_clip(clip);
     canvas.fill(view, layout.canvas);
     let dx = view.0;
     let dy = view.1 - scroll;

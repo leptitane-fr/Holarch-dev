@@ -25,7 +25,7 @@ jobs:
         run: |
           cargo clippy --all-targets -- -D warnings
           cargo clippy -p hln-navigateur --target wasm32-unknown-unknown -- -D warnings
-          cargo clippy -p hln-navigateur --features network --target wasm32-unknown-unknown -- -D warnings
+          cargo clippy -p hln-navigateur --no-default-features --target wasm32-unknown-unknown -- -D warnings
 
       - name: Unit tests
         run: cargo test

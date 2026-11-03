@@ -68,7 +68,10 @@ const SCOPE: &[&str] = &["html", "table", "td", "th", "caption", "marquee", "obj
 
 /// The page's bytes as text: a byte order mark, else the charset of the
 /// `Content-Type` (`content_type`), else a `<meta charset>` near the top,
-/// else UTF-8 when the bytes are valid UTF-8, else Windows-1252.
+/// else UTF-8 when the bytes are valid UTF-8, else Windows-1252. A page
+/// said to be UTF-8 that is not (some servers send Latin-1 under a UTF-8
+/// `<meta>`) keeps its UTF-8 sequences, and each other byte is read as
+/// Windows-1252 rather than lost.
 pub fn decode(bytes: &[u8], content_type: Option<&str>) -> String {
     if let Some(rest) = bytes.strip_prefix(b"\xef\xbb\xbf") {
         return String::from_utf8_lossy(rest).into_owned();
@@ -89,8 +92,29 @@ pub fn decode(bytes: &[u8], content_type: Option<&str>) -> String {
     );
     match core::str::from_utf8(bytes) {
         Ok(text) if !latin => String::from(text),
-        _ if !latin && charset.starts_with("utf") => String::from_utf8_lossy(bytes).into_owned(),
+        _ if !latin && charset.starts_with("utf") => mixed(bytes),
         _ => bytes.iter().map(|&b| windows_1252(b)).collect(),
+    }
+}
+
+/// UTF-8 where it is valid, Windows-1252 for each byte where it is not.
+fn mixed(mut bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len());
+    loop {
+        match core::str::from_utf8(bytes) {
+            Ok(text) => {
+                out.push_str(text);
+                return out;
+            }
+            Err(e) => {
+                let (good, rest) = bytes.split_at(e.valid_up_to());
+                // SAFETY: `from_utf8` checked these bytes are UTF-8.
+                out.push_str(unsafe { core::str::from_utf8_unchecked(good) });
+                let bad = e.error_len().unwrap_or(rest.len()).max(1);
+                out.extend(rest[..bad].iter().map(|&b| windows_1252(b)));
+                bytes = &rest[bad..];
+            }
+        }
     }
 }
 
@@ -747,5 +771,10 @@ mod tests {
         assert_eq!(decode("café".as_bytes(), None), "café");
         assert_eq!(decode(b"\x80", Some("text/html; charset=windows-1252")), "€");
         assert_eq!(decode(b"<meta charset=iso-8859-1>\xe9", None), "<meta charset=iso-8859-1>é");
+        // Latin-1 under a UTF-8 `<meta>`, mixed with real UTF-8.
+        assert_eq!(
+            decode(b"<meta charset=utf-8>continuer \xe0 \xc3\xa9t\xc3\xa9", None),
+            "<meta charset=utf-8>continuer à été"
+        );
     }
 }

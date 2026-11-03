@@ -2,6 +2,246 @@
 
 À lire en premier par la session suivante. Le plus récent en haut.
 
+## 2026-11-03 — Cible de Stef : claude.ai, connexion comprise
+
+**La demande** (Stef, 03/11) : rendre le navigateur parfaitement
+opérationnel ; première cible, afficher et utiliser claude.ai, connexion
+comprise.
+
+**Ce que claude.ai demande vraiment** (mesuré depuis le PC, curl) :
+- À tout client qui n'est pas reconnu comme un navigateur complet,
+  claude.ai (`/` comme `/login`) répond **403** avec la page de Cloudflare
+  « Just a moment… » (`cf-mitigated: challenge`, `cType: 'managed'`) :
+  un **défi géré** qui ne se passe qu'en exécutant
+  `/cdn-cgi/challenge-platform/h/g/orchestrate/chl_page/v1` (**610 Kio de
+  JavaScript obfusqué**), avec `unsafe-eval` permis et
+  `challenges.cloudflare.com` (Turnstile, dans une iframe d'une autre
+  origine). Il pose le cookie `cf_clearance` une fois passé. Il observe
+  l'environnement (DOM, événements, minuteries…) pour reconnaître un vrai
+  navigateur ; un navigateur écrit de zéro peut le passer s'il est assez
+  complet (Ladybird y arrive après des années), sans garantie.
+- HTTP/2 et zstd côté serveur, mais il répond en HTTP/1.1 et sans
+  compression (`identity`) si on le demande.
+- Derrière : une application React (JavaScript moderne, plusieurs Mio),
+  un éditeur `contenteditable` (ProseMirror) pour la saisie, des réponses
+  qui arrivent **en flux** (SSE par `fetch`), des cookies de session.
+- La connexion : par **adresse e-mail et code reçu** (le plus simple), ou
+  par Google (une autre application JavaScript, avec sa propre détection).
+
+**Ce qu'il y a aujourd'hui** :
+- Moteur : HTML, CSS (variables, `calc`, flex, positionnement, tableaux,
+  flottants), mise en page, peinture, formulaires GET. **Aucun
+  JavaScript**, pas d'images, pas de `@font-face` (woff2), pas de SVG
+  dessiné, pas de grille, pas de `z-index`, pas de `contenteditable`.
+- Réseau du système (`hln.fetch`, `crates/net` de Madoo) : HTTP/1.1, GET
+  seulement, aucune en-tête du holon (ni cookie, ni type, ni origine),
+  `User-Agent: hln-net/0.1`, réponse entière et bloquante (8 Mio au
+  plus), ni statut ni en-têtes rendus au navigateur, ni adresse finale.
+  TLS par rustls (TLS 1.3, moderne).
+- Le holon tourne dans l'interpréteur WebAssembly du système, qui
+  **sait maintenant les flottants** (`crates/wasm/src/float.rs` de Madoo) :
+  la règle « entiers seulement » de ce dépôt est à revoir (un moteur
+  JavaScript calcule en flottants, ses nombres sont des `f64`).
+
+**La feuille de route** (une version par jalon, chacun vérifiable au banc) :
+1. **Réseau, contrat v2** (système + navigateur) : méthodes (POST…), en-têtes
+   de la requête et de la réponse, statut, adresse finale, corps envoyé,
+   réponse **en flux** et **non bloquante** (une poignée par requête, des
+   événements), connexions gardées, cookies (`Set-Cookie`, le bocal à
+   cookies gardé dans le coffre), un `User-Agent` honnête.
+2. **Où tourne le moteur** (décision de Stef) : un moteur JavaScript
+   interprété dans un holon lui-même interprété serait des dizaines de fois
+   trop lent pour les Mio de JavaScript de claude.ai. Soit le navigateur
+   devient un **programme natif** du système (comme le Bureau), isolé et
+   avec ses droits ; soit le système apprend à **compiler les holons
+   WebAssembly en code machine** (utile à tous les holons, plus long).
+3. **Moteur JavaScript** écrit de zéro : analyse ES2023, bytecode,
+   machine virtuelle, ramasse-miettes, tous les objets standard (Promise,
+   async, générateurs, classes, Proxy, Map/Set/Weak*, Symbol, RegExp
+   complète, Date, JSON, tableaux typés, BigInt, Intl de base), modules et
+   `import()`. Banc : une partie de test262.
+4. **DOM et API du Web** : DOM modifiable, événements, boucle d'événements,
+   minuteries, `fetch`/XHR/flux, `document.cookie`, `localStorage`,
+   `history`, observateurs (Mutation, Resize, Intersection), CSSOM
+   (`getComputedStyle`, `getBoundingClientRect`), `crypto`
+   (`getRandomValues`, `subtle`), `TextEncoder`, `URL`, `postMessage` et
+   iframes d'autres origines.
+5. **Rendu manquant** : grille, `z-index` et contextes d'empilement,
+   défilement dans les boîtes, `@font-face` (woff2, donc Brotli), SVG,
+   images (PNG, JPEG, WebP).
+6. **Le défi de Cloudflare** passé (Turnstile compris, la case cochée par
+   Stef s'il le faut).
+7. **La page de connexion** de claude.ai, connexion par e-mail et code ;
+   la session gardée (cookies dans le coffre).
+8. **La conversation** : saisie (`contenteditable`, Selection/Range),
+   réponses en flux, rendu du Markdown et du code.
+
+Côté banc : des pages enregistrées et des suites publiques (test262,
+web-platform-tests) ; l'essai réel sur claude.ai se fait par Stef, avec
+son compte (Claude ne tape jamais d'identifiant).
+
+**Décisions de Stef (03/11)** :
+- **Le navigateur devient un programme natif** du système (comme le
+  Bureau), isolé, avec ses droits, toujours livré par le dépôt.
+- **Deux comptes claude.ai** à ouvrir : l'un se connecte par e-mail et
+  code, l'autre par Google. Si le compte Google accepte aussi la
+  connexion par e-mail et code (à essayer par Stef dans un navigateur
+  ordinaire : « Continuer avec l'e-mail » avec l'adresse Gmail du compte),
+  Google attend ; sinon la connexion Google entre dans la feuille de route
+  (accounts.google.com à faire marcher aussi). **Essayé par Stef : le
+  compte Google se connecte aussi par e-mail et code. Google attend** :
+  une seule connexion à faire marcher, par e-mail et code, pour les deux
+  comptes.
+- Stef : « commence avec le jalon 1 » (le réseau du système, contrat v2).
+
+## 2026-11-03 — La 0.1.2 livrée au système (Holarch Madoo)
+
+Le système s'appelle maintenant, pour le Chromebook, **Holarch Madoo**
+(`C:\Holarch\Madoo`, github.com/leptitane-fr/Holarch-system-Madoo, branche
+`madoo`) : installé seul sur le disque interne du Chromebook, sans
+Windows. Son dépôt de mises à jour est github.com/leptitane-fr/Horlach-update-Madoo
+(Stef y avait installé la 0.1.1 depuis la Bibliothèque).
+
+Livraison : les sources de `12c5326` (`crates/type`, `crates/web`,
+`crates/browser`, `holons/navigateur`) recopiées telles quelles dans
+Madoo, sa ligne `WASM_HOLONS` à 0.1.2, le banc de Madoo vert, puis le
+dépôt de mises à jour republié avec `navigateur 0.1.2` (le Centre de
+mises à jour de Stef la propose). `main` de ce dépôt-ci reste au premier
+dépôt du navigateur (PR #2 non fusionnée).
+
+Reste à faire : comme au 16/10 (la cascade à chaque `@media` franchie,
+les images, la grille CSS, le chargement sans bloquer) ; côté système,
+le pointeur caché pendant la recopie de l'image d'un holon.
+
+## 2026-10-16 — Le pointeur qui clignote, la fenêtre agrandie lente (0.1.2)
+
+Désormais le travail se fait **en local**, sur le PC de Stef
+(`C:\Holarch\Holarch-dev`, Windows, Rust 1.98.1 et les Build Tools de
+Visual Studio 2026 pour l'éditeur de liens) ; GitHub sert de sauvegarde.
+Lancer cargo depuis PowerShell : le `link` de Git Bash cache celui de
+Microsoft. Les souhaits du 14/10 (interface modulable, vérification des
+sites) attendent que le navigateur soit abouti (Stef, 16/10).
+
+Retours de Stef : le pointeur clignote au-dessus du contenu de la
+fenêtre (pas au-dessus de sa barre de titre) ; agrandie, la fenêtre met
+une bonne seconde à s'adapter.
+
+Mesuré en faisant tourner le holon dans l'interpréteur d'alpha-2
+(`crates/wasm`, lu sur place, un petit programme hors du dépôt qui lui
+envoie fenêtre, pointeur et touches), sur l'i7 de Stef :
+- **chaque mouvement du pointeur** sur la page refaisait toute l'image et
+  la présentait : 20 ms en 960 × 600, 40 ms en 1920 × 1040. Le système
+  cache son pointeur pendant qu'il recopie l'image d'un holon (démarrage
+  natif, `programs/session` d'alpha-2 : `cursor.hide` puis `present`) :
+  d'où le clignotement, là où le holon dessine et nulle part ailleurs.
+- **agrandir** pypi.org : 1,6 s (feuilles relues 0,3 s, styles 0,6 s,
+  peinture 0,25 s…) ; l'accueil : 0,24 s.
+
+Corrigé :
+- le navigateur retient les rectangles dont son dessin demande s'ils sont
+  sous le pointeur (`chrome::hovered`, `Browser::hovers`) ; un mouvement
+  ne redessine que s'il entre dans l'un d'eux ou en sort, ou change le
+  lien survolé. Au-dessus du texte d'une page : plus aucun dessin.
+- les feuilles sont lues **une fois** par page (`css::read_sheet`) : chaque
+  règle garde les requêtes `@media` dont elle dépend (`Rule::when`) ;
+  l'index ne prend que celles qui valent pour la taille
+  (`Index::add(…, media)`), et les déclarations d'une règle sont
+  partagées (`Rc<[Decl]>`) au lieu d'être recopiées par sélecteur.
+- les styles sont **gardés** quand une nouvelle taille répond pareil à
+  toutes les requêtes et qu'aucune longueur n'est en `vw`/`vh`
+  (`Page::styled`) : seule la mise en page est refaite.
+- les règles d'un élément ne sont cherchées qu'une fois, pour lui, son
+  `::before` et son `::after` (avant : trois fois) ; une valeur sans
+  `var()` n'est plus recopiée.
+- un remplissage plein copie sa première ligne au lieu de poser chaque
+  pixel (`paint::fill_span`, des `memory.copy` dans l'interpréteur) :
+  peinture de pypi.org en 1920 × 1040, 0,25 s → 0,04 s.
+- **à la nouvelle taille, une image tout de suite** : le haut du
+  navigateur à la bonne largeur et la page telle qu'elle était peinte
+  (`Browser::draw_quick`), puis la page remise en page.
+
+Résultat (i7, interpréteur) : agrandir pypi.org, première image en
+0,04 s puis la page en 0,4 s (au lieu de 1,6 s) ; l'accueil en 0,04 s.
+
+Version **0.1.2** (`docs/livraison-alpha-2.md`).
+
+### Reste à faire
+1. Côté système (alpha-2, pas ici) : ne pas cacher le pointeur pendant
+   la recopie de l'image d'un holon (le dessiner dans l'image avant de la
+   montrer) ; à confirmer si Stef voit aussi le clignotement dans
+   Windows, où c'est Windows qui dessine le pointeur.
+2. Styles encore 0,3 s sur pypi.org à chaque changement de taille qui
+   franchit une requête `@media` (ou avec des `vh`) : la cascade.
+3. Puis, comme avant : images, grille CSS, chargement sans bloquer.
+
+## 2026-10-14 (après-midi) — Premier essai de Stef, et ce qu'il a changé
+
+Retours de Stef sur le premier essai dans Holarch :
+1. **Frappe très lente.** Mesuré dans l'interpréteur d'alpha-2 copié, en
+   1920 × 1040 : 0,35 s par touche dans la barre d'adresse sur l'accueil,
+   0,55 s sur pypi.org ; et dans un champ de la page, le moteur refaisait
+   toute la mise en page (feuilles relues, styles, blocs) à chaque
+   lettre. Corrigé :
+   - un champ garde sa taille : son texte est remplacé dans la mise en
+     page (`Page::set_field_value`, `patch`), sans la refaire ;
+   - le navigateur garde l'image de la page (`Browser::painted`, clé :
+     `Page::generation`, vue, défilement, surimpression) et ne la
+     repeint pas quand seul le haut change ; quand seuls des champs ont
+     changé (`Page::patched_since`), il ne repeint que leur rectangle
+     (`paint::paint_part`). Un essai vérifie que l'image est la même
+     qu'une peinture entière.
+   - Résultat : ~0,06 s par touche partout, au lieu de 0,3 à 0,55 s.
+2. **pipy.com : fond uni.** Stef a tapé pipy.com, pas pypi.org ; ce site
+   n'est pas joignable d'ici (proxy). Très probablement une page faite en
+   JavaScript (non vérifié).
+3. **google.com : mise en page désordonnée, pas d'images.** Attendu :
+   pas encore d'images ni de grille CSS ni de JavaScript.
+4. **« continuer à rechercher » sans le « à ».** Le système ne donne pas
+   le type de contenu ; Google envoie du Latin-1 sous un `<meta>` qui dit
+   UTF-8 (supposé, Google n'est pas joignable d'ici), et l'octet `à`
+   était perdu. Corrigé dans `html::decode` : une page dite UTF-8 qui ne
+   l'est pas garde ses suites UTF-8 et lit chaque autre octet en
+   Windows-1252. La recherche Google demande JavaScript : celle de
+   l'accueil (DuckDuckGo HTML) marche sans.
+
+Version **0.1.1** (pour que la copie installée se mette à jour), SHA-256
+`2f7085ab…f32e` (`docs/livraison-alpha-2.md`).
+
+### Reste à faire, par ordre d'effet sur ce que voit Stef
+1. Les images (PNG, JPEG, GIF) : Google et la plupart des sites.
+2. La grille CSS.
+3. Un chargement qui ne bloque pas la fenêtre (côté système).
+
+## 2026-10-14 (midi) — Le holon accordé au système d'alpha-2
+
+Lu dans alpha-2 (en lecture seule) : #70 fusionnée (modules de 16 Mio,
+mémoire de 256 Mio, virgule flottante), #71 fusionnée (droit `network`,
+`hln.fetch` à la signature du holon : `https` seulement, appel bloquant,
+ni POST, ni type de contenu, ni adresse finale), #72 en relecture (fenêtre
+de toute taille et plein écran, `RESIZED`, `WHEEL`, Maj/Ctrl/Alt aux
+bits 36 à 38, Page précédente 12 et suivante 13). Le navigateur n'est pas
+encore dans le dépôt (Holarch-update).
+
+### Fait (branche `claude/navigateur-web-sydt7q`, PR #2)
+- `network` est l'option par défaut : `navigateur.wasm` importe
+  `hln.fetch` ; `navigateur-hors-ligne.wasm` (`--no-default-features`)
+  ne l'importe pas. CI et README suivent.
+- Le holon lit les mots de #72 : `RESIZED` (le navigateur et son image
+  prennent la taille donnée), `WHEEL` (le système compte vers le haut, le
+  navigateur vers le bas : signe inversé), les modificateurs, Page
+  précédente et suivante.
+- Une adresse `http` est demandée en `https`.
+- Essayé dans l'interpréteur d'alpha-2 copié (bac à sable) : tout cela
+  marche ; SHA-256 du holon `93301dcf…9658`.
+- `docs/livraison-alpha-2.md` : la ligne `WASM_HOLONS` porte maintenant
+  le droit `network`.
+
+### Reste à faire
+1. Livraison par la session d'alpha-2 (fusion de #72, ligne
+   `WASM_HOLONS`, publication dans le dépôt), puis premier essai avec Stef.
+2. Quand le système les donnera : POST, type de contenu, adresse finale,
+   chargement sans bloquer la fenêtre.
+
 ## La suite voulue par Stef (14/10, 8 h 47)
 
 PR #1 passée en relecture. Ensuite, dans l'ordre :

@@ -18,7 +18,7 @@ rien d'autre. Le système est dans le dépôt `Holarch-system-alpha-2`.
 
 - `cargo test` : les essais ;
 - `cargo xtask holon` : construit le holon (`build/holon/navigateur.wasm`,
-  et `navigateur-reseau.wasm` avec l'import `hln.fetch`) et vérifie ce que
+  avec l'import `hln.fetch`, et `navigateur-hors-ligne.wasm` sans) et vérifie ce que
   vérifie le système : les imports permis, aucune instruction flottante ;
 - `cargo xtask bench [adresse…] [--size LxH]` : fait tourner tout le
   navigateur et enregistre une image après chaque étape (`build/bench/`) ;
@@ -29,7 +29,10 @@ rien d'autre. Le système est dans le dépôt `Holarch-system-alpha-2`.
 
 ## Ce qu'il attend du système
 
-Le droit `network` et l'import `hln.fetch` (décrit dans
-`holons/navigateur/src/lib.rs`), des modules et une mémoire plus grands
-(le holon pèse environ 1,6 Mo), une fenêtre plus grande que 480 × 320,
-la molette et la touche Ctrl. Voir `docs/JOURNAL.md`.
+Le système le reçoit comme une application qui demande le droit `network`
+(`rights = network`) : il importe `hln.fetch`, décrit dans
+`holons/navigateur/src/lib.rs`. La fenêtre prend toute taille (et le plein
+écran), la molette et Ctrl, Alt, Maj arrivent avec les touches. Encore
+attendus côté système : l'envoi de formulaires (POST), le type de contenu
+et l'adresse finale, et un chargement qui ne bloque pas la fenêtre. Voir
+`docs/JOURNAL.md`.
