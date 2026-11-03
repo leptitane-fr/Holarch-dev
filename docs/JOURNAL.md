@@ -2,6 +2,25 @@
 
 À lire en premier par la session suivante. Le plus récent en haut.
 
+## 2026-11-03 — La 0.1.2 livrée au système (Holarch Madoo)
+
+Le système s'appelle maintenant, pour le Chromebook, **Holarch Madoo**
+(`C:\Holarch\Madoo`, github.com/leptitane-fr/Holarch-system-Madoo, branche
+`madoo`) : installé seul sur le disque interne du Chromebook, sans
+Windows. Son dépôt de mises à jour est github.com/leptitane-fr/Horlach-update-Madoo
+(Stef y avait installé la 0.1.1 depuis la Bibliothèque).
+
+Livraison : les sources de `12c5326` (`crates/type`, `crates/web`,
+`crates/browser`, `holons/navigateur`) recopiées telles quelles dans
+Madoo, sa ligne `WASM_HOLONS` à 0.1.2, le banc de Madoo vert, puis le
+dépôt de mises à jour republié avec `navigateur 0.1.2` (le Centre de
+mises à jour de Stef la propose). `main` de ce dépôt-ci reste au premier
+dépôt du navigateur (PR #2 non fusionnée).
+
+Reste à faire : comme au 16/10 (la cascade à chaque `@media` franchie,
+les images, la grille CSS, le chargement sans bloquer) ; côté système,
+le pointeur caché pendant la recopie de l'image d'un holon.
+
 ## 2026-10-16 — Le pointeur qui clignote, la fenêtre agrandie lente (0.1.2)
 
 Désormais le travail se fait **en local**, sur le PC de Stef
