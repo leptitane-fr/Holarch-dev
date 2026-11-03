@@ -80,6 +80,16 @@ Côté banc : des pages enregistrées et des suites publiques (test262,
 web-platform-tests) ; l'essai réel sur claude.ai se fait par Stef, avec
 son compte (Claude ne tape jamais d'identifiant).
 
+**Décisions de Stef (03/11)** :
+- **Le navigateur devient un programme natif** du système (comme le
+  Bureau), isolé, avec ses droits, toujours livré par le dépôt.
+- **Deux comptes claude.ai** à ouvrir : l'un se connecte par e-mail et
+  code, l'autre par Google. Si le compte Google accepte aussi la
+  connexion par e-mail et code (à essayer par Stef dans un navigateur
+  ordinaire : « Continuer avec l'e-mail » avec l'adresse Gmail du compte),
+  Google attend ; sinon la connexion Google entre dans la feuille de route
+  (accounts.google.com à faire marcher aussi).
+
 ## 2026-11-03 — La 0.1.2 livrée au système (Holarch Madoo)
 
 Le système s'appelle maintenant, pour le Chromebook, **Holarch Madoo**
